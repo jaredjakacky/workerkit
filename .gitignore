@@ -16,6 +16,8 @@
 coverage.*
 *.coverprofile
 profile.cov
+.cache/
+.bin/
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
@@ -29,4 +31,11 @@ go.work.sum
 
 # Editor/IDE
 # .idea/
-# .vscode/
+.codex
+
+# Local editor config
+.vscode/
+
+# Delve / VS Code Go debug binaries
+__debug_bin*
+**/__debug_bin*
