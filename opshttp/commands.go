@@ -6,7 +6,7 @@ import (
 	"net/http"
 
 	"github.com/jaredjakacky/servekit"
-	workerkit "github.com/jaredjakacky/workerkit-incubator"
+	workerkit "github.com/jaredjakacky/workerkit"
 )
 
 type dispatchRequest struct {

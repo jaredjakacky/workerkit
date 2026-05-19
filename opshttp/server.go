@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/jaredjakacky/servekit"
-	workerkit "github.com/jaredjakacky/workerkit-incubator"
+	workerkit "github.com/jaredjakacky/workerkit"
 )
 
 // DefaultPrefix is the route prefix used by Mount when WithPrefix is not
