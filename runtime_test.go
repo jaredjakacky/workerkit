@@ -235,7 +235,7 @@ func TestLifecycleAttemptFailureDoesNotEmitDuplicateFailureEvent(t *testing.T) {
 	}
 }
 
-func TestFailedWorkerFailureDoesNotEmitNoopTransition(t *testing.T) {
+func TestFailedWorkerFailureDoesNotEmitDuplicateLifecycleFailureEvent(t *testing.T) {
 	observer := &recordingObserver{}
 	reportedFailure := errors.New("reported during start")
 	returnedFailure := errors.New("returned after report")
@@ -263,6 +263,14 @@ func TestFailedWorkerFailureDoesNotEmitNoopTransition(t *testing.T) {
 	if !errors.Is(err, returnedFailure) {
 		t.Fatalf("Start error = %v, want %v", err, returnedFailure)
 	}
+	snapshot := requireWorker(t, rt, "worker")
+	status := snapshot.Status
+	if status.State != StateFailed {
+		t.Fatalf("worker state = %s, want %s", status.State, StateFailed)
+	}
+	if status.LastFailure == nil || status.LastFailure.Message != returnedFailure.Error() {
+		t.Fatalf("LastFailure = %#v, want %q", status.LastFailure, returnedFailure.Error())
+	}
 
 	var failedToFailed int
 	for _, event := range observer.transitions {
@@ -272,6 +280,15 @@ func TestFailedWorkerFailureDoesNotEmitNoopTransition(t *testing.T) {
 	}
 	if failedToFailed != 0 {
 		t.Fatalf("failed -> failed worker transitions = %d, want 0", failedToFailed)
+	}
+	if got := len(observer.failures); got != 1 {
+		t.Fatalf("failure events = %d, want 1", got)
+	}
+	if !errors.Is(observer.failures[0].Err, reportedFailure) {
+		t.Fatalf("failure event error = %v, want %v", observer.failures[0].Err, reportedFailure)
+	}
+	if observer.failures[0].Command != "" {
+		t.Fatalf("failure event command = %q, want empty", observer.failures[0].Command)
 	}
 }
 
@@ -660,6 +677,63 @@ func TestShutdownDrainsWaitsForInFlightCommandsAndStopsInReverseOrder(t *testing
 	}
 	if got := strings.Join(stops, ","); got != "second,first" {
 		t.Fatalf("stop order = %q, want second,first", got)
+	}
+}
+
+func TestShutdownTimeoutBeforeStopAllDoesNotFailWorker(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var stops int
+	rt := newTestRuntime(t)
+	if err := rt.Register(
+		WorkerSpec{
+			Name: "worker",
+			Worker: testWorker{
+				stop: func(ctx context.Context) error {
+					stops++
+					return ctx.Err()
+				},
+			},
+		},
+		WithCommand("block", CommandHandlerFunc(func(context.Context, CommandRequest) (CommandResult, error) {
+			close(entered)
+			<-release
+			return CommandResult{}, nil
+		})),
+	); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "worker"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	dispatchDone := make(chan error, 1)
+	go func() {
+		_, err := rt.Dispatch(context.Background(), CommandRequest{Worker: "worker", Name: "block"})
+		dispatchDone <- err
+	}()
+	<-entered
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	err := rt.Shutdown(shutdownCtx)
+	close(release)
+	if dispatchErr := <-dispatchDone; dispatchErr != nil {
+		t.Fatalf("Dispatch returned error: %v", dispatchErr)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown error = %v, want DeadlineExceeded", err)
+	}
+	if stops != 0 {
+		t.Fatalf("stop calls = %d, want 0", stops)
+	}
+	snapshot := requireWorker(t, rt, "worker")
+	status := snapshot.Status
+	if status.State != StateDraining {
+		t.Fatalf("worker state = %s, want %s", status.State, StateDraining)
+	}
+	if status.LastFailure != nil {
+		t.Fatalf("LastFailure = %#v, want nil", status.LastFailure)
 	}
 }
 

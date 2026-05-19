@@ -471,8 +471,16 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 	if err := r.DrainAllBestEffort(ctx); err != nil {
 		errs = append(errs, err)
 	}
+	if err := ctx.Err(); err != nil {
+		errs = append(errs, err)
+		return errors.Join(errs...)
+	}
 	if err := r.WaitAllIdle(ctx); err != nil {
 		errs = append(errs, err)
+	}
+	if err := ctx.Err(); err != nil {
+		errs = append(errs, err)
+		return errors.Join(errs...)
 	}
 	if err := r.StopAll(ctx); err != nil {
 		errs = append(errs, err)
@@ -1022,6 +1030,7 @@ func (r *Runtime) failWorkerWithCommandAttempt(ctx context.Context, name, comman
 
 	state := r.workerStates[name]
 	before := state
+	suppressFailureEvent := command == "" && before.lifecycle == StateFailed && before.lastFailure != nil
 	now := time.Now()
 	state.lastTransition = &LifecycleTransition{
 		From: state.lifecycle,
@@ -1044,7 +1053,9 @@ func (r *Runtime) failWorkerWithCommandAttempt(ctx context.Context, name, comman
 		r.observeTransition(ctx, obs.worker, obs.from, obs.to, obs.at)
 	}
 	r.observeReadinessChange(ctx, obs.worker, obs.beforeReady, obs.afterReady, obs.at)
-	r.observeFailure(ctx, name, command, err, panicked, now, dispatchID, attempt)
+	if !suppressFailureEvent {
+		r.observeFailure(ctx, name, command, err, panicked, now, dispatchID, attempt)
+	}
 	r.observeRuntimeChanges(ctx, obs.before, obs.after)
 }
 
