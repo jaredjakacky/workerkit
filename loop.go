@@ -1,0 +1,330 @@
+package workerkit
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+)
+
+const loopFailureStopHookTimeout = 5 * time.Second
+
+var (
+	// ErrLoopExitedUnexpectedly reports that a LoopWorker loop returned nil before
+	// Stop canceled it.
+	ErrLoopExitedUnexpectedly = errors.New("loop worker exited unexpectedly")
+	// ErrLoopWorkerActive reports that Start found an existing loop lifecycle in
+	// progress instead of launching a new loop.
+	ErrLoopWorkerActive = errors.New("loop worker already active")
+)
+
+// LoopFunc is the long-running background function managed by LoopWorker.
+type LoopFunc func(context.Context, WorkerRuntime) error
+
+// LoopWorkerOption configures a LoopWorker.
+type LoopWorkerOption func(*loopWorkerConfig)
+
+type loopWorkerConfig struct {
+	onStart   func(context.Context, WorkerRuntime) error
+	onStop    func(context.Context, WorkerRuntime) error
+	autoReady bool
+}
+
+type loopWorkerState int
+
+const (
+	loopIdle loopWorkerState = iota
+	loopStarting
+	loopRunning
+	loopStopping
+	loopStopped
+)
+
+func (s loopWorkerState) String() string {
+	switch s {
+	case loopIdle:
+		return "idle"
+	case loopStarting:
+		return "starting"
+	case loopRunning:
+		return "running"
+	case loopStopping:
+		return "stopping"
+	case loopStopped:
+		return "stopped"
+	default:
+		return fmt.Sprintf("unknown(%d)", int(s))
+	}
+}
+
+// WithLoopStart sets an optional hook run before the loop goroutine starts.
+func WithLoopStart(fn func(context.Context, WorkerRuntime) error) LoopWorkerOption {
+	return func(cfg *loopWorkerConfig) {
+		cfg.onStart = fn
+	}
+}
+
+// WithLoopStop sets an optional cleanup hook run after the loop goroutine
+// stops. The hook runs at most once, including after an unexpected loop failure.
+func WithLoopStop(fn func(context.Context, WorkerRuntime) error) LoopWorkerOption {
+	return func(cfg *loopWorkerConfig) {
+		cfg.onStop = fn
+	}
+}
+
+// WithLoopAutoReady controls whether Start marks the worker ready after
+// launching the loop goroutine.
+//
+// Auto-ready is a convenience for loops whose successful launch is enough to
+// consider the worker operational. It does not prove that the loop completed
+// domain warmup, acquired leases, connected to brokers, completed a first poll,
+// or validated external dependencies. Disable auto-ready when readiness depends
+// on work performed inside the loop, and call WorkerRuntime.SetReady(true) from
+// the loop after that condition is met.
+func WithLoopAutoReady(enabled bool) LoopWorkerOption {
+	return func(cfg *loopWorkerConfig) {
+		cfg.autoReady = enabled
+	}
+}
+
+// LoopWorker is a Worker implementation for long-running background loops.
+//
+// Use NewLoopWorker to construct one with production-oriented lifecycle
+// behavior: Start launches the loop in a goroutine, Stop cancels the loop and
+// waits for it to exit, and unexpected loop exits are reported through
+// WorkerRuntime.ReportFailure. By default, Start marks the worker ready after
+// the loop goroutine starts. This is only a launch-readiness signal. Use
+// WithLoopAutoReady(false) when readiness depends on domain warmup inside the
+// loop, such as acquiring a lease, connecting to a broker, loading initial
+// state, completing a first poll, or validating external dependencies. In that
+// mode, the loop should call WorkerRuntime.SetReady(true) when it is actually
+// ready.
+//
+// The loop context preserves values from the Start call for telemetry and
+// correlation, but is detached from Start cancellation because Start returns
+// after launching the background loop. Stop owns loop cancellation through the
+// LoopWorker's internal cancel function. Loop functions should still observe
+// ctx.Done() so Stop can shut them down cleanly.
+type LoopWorker struct {
+	loop      LoopFunc
+	onStart   func(context.Context, WorkerRuntime) error
+	onStop    func(context.Context, WorkerRuntime) error
+	autoReady bool
+
+	mu      sync.Mutex
+	state   loopWorkerState
+	cancel  context.CancelFunc
+	done    chan struct{}
+	runtime WorkerRuntime
+
+	stopHookCalled bool
+}
+
+// NewLoopWorker constructs a LoopWorker for a long-running background loop.
+// It enables auto-ready by default. Use WithLoopAutoReady(false) for
+// domain-gated readiness.
+func NewLoopWorker(loop LoopFunc, opts ...LoopWorkerOption) *LoopWorker {
+	cfg := loopWorkerConfig{
+		autoReady: true,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return &LoopWorker{
+		loop:      loop,
+		onStart:   cfg.onStart,
+		onStop:    cfg.onStop,
+		autoReady: cfg.autoReady,
+	}
+}
+
+// Start implements Worker.
+func (w *LoopWorker) Start(ctx context.Context) error {
+	if w.loop == nil {
+		return errors.New("loop worker loop must not be nil")
+	}
+
+	runtime, ok := WorkerRuntimeFromContext(ctx)
+	if !ok {
+		return errors.New("worker runtime handle unavailable")
+	}
+
+	if err := w.beginStart(); err != nil {
+		return err
+	}
+	started := false
+	defer func() {
+		if !started {
+			w.finishFailedStart()
+		}
+	}()
+
+	if w.onStart != nil {
+		if err := w.onStart(ctx, runtime); err != nil {
+			return err
+		}
+	}
+
+	// Preserve Start context values for telemetry/correlation, but detach from
+	// Start cancellation because the loop outlives the Start call. Stop uses this
+	// cancel function to shut the loop down.
+	loopCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	done := make(chan struct{})
+	w.finishStart(runtime, cancel, done)
+	started = true
+
+	go w.runLoop(loopCtx, runtime, done)
+
+	if !w.autoReady {
+		return runtime.SetReady(false)
+	}
+	if err := runtime.SetReady(true); err != nil {
+		w.markStopping(done)
+		cancel()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return fmt.Errorf("mark loop worker ready: %w", err)
+		}
+		if stopErr := w.runStopHook(ctx, runtime); stopErr != nil {
+			return errors.Join(err, stopErr)
+		}
+		return err
+	}
+	return nil
+}
+
+// Stop implements Worker.
+func (w *LoopWorker) Stop(ctx context.Context) error {
+	cancel, done, runtime, ok := w.beginStop()
+	if ok {
+		cancel()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	if runtime == nil {
+		var ok bool
+		runtime, ok = WorkerRuntimeFromContext(ctx)
+		if !ok {
+			return errors.New("worker runtime handle unavailable")
+		}
+	}
+	return w.runStopHook(ctx, runtime)
+}
+
+func (w *LoopWorker) beginStart() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.state == loopStarting || w.state == loopRunning || w.state == loopStopping {
+		return fmt.Errorf("%w: state=%s", ErrLoopWorkerActive, w.state)
+	}
+	w.state = loopStarting
+	return nil
+}
+
+func (w *LoopWorker) finishStart(runtime WorkerRuntime, cancel context.CancelFunc, done chan struct{}) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.runtime = runtime
+	w.cancel = cancel
+	w.done = done
+	w.state = loopRunning
+	w.stopHookCalled = false
+}
+
+func (w *LoopWorker) finishFailedStart() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.state = loopIdle
+}
+
+func (w *LoopWorker) beginStop() (context.CancelFunc, chan struct{}, WorkerRuntime, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.state != loopRunning || w.cancel == nil || w.done == nil {
+		return nil, nil, w.runtime, false
+	}
+	w.state = loopStopping
+	return w.cancel, w.done, w.runtime, true
+}
+
+func (w *LoopWorker) markStopping(done chan struct{}) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.done == done {
+		w.state = loopStopping
+	}
+}
+
+func (w *LoopWorker) runLoop(ctx context.Context, runtime WorkerRuntime, done chan struct{}) {
+	err := w.loop(ctx, runtime)
+
+	w.mu.Lock()
+	stopping := w.state == loopStopping
+	if w.done == done {
+		w.cancel = nil
+		w.done = nil
+		w.runtime = nil
+		if stopping {
+			w.state = loopStopped
+		} else {
+			w.state = loopIdle
+		}
+	}
+	w.mu.Unlock()
+
+	close(done)
+
+	if stopping && ctx.Err() != nil {
+		return
+	}
+	if err == nil {
+		err = ErrLoopExitedUnexpectedly
+	}
+	if err != nil {
+		_ = runtime.ReportFailure(err)
+		// Run failure cleanup here once because the loop has already exited and
+		// Stop can no longer wait on it. Preserve loop context values for
+		// telemetry, but bound cleanup because this path is best-effort and
+		// errors are ignored after the primary loop failure has already been
+		// reported.
+		stopCtx := context.WithoutCancel(ctx)
+		stopCtx, cancel := context.WithTimeout(stopCtx, loopFailureStopHookTimeout)
+		defer cancel()
+		_ = w.runStopHook(stopCtx, runtime)
+	}
+}
+
+func (w *LoopWorker) runStopHook(ctx context.Context, runtime WorkerRuntime) error {
+	if !w.claimStopHook() {
+		return nil
+	}
+	if w.onStop == nil {
+		return nil
+	}
+	return w.onStop(ctx, runtime)
+}
+
+func (w *LoopWorker) claimStopHook() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.stopHookCalled {
+		return false
+	}
+	w.stopHookCalled = true
+	w.state = loopStopped
+	return true
+}
