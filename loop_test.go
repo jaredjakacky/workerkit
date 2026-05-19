@@ -9,6 +9,18 @@ import (
 	"time"
 )
 
+type loopReadyFailRuntime struct {
+	fakeWorkerRuntime
+	readyFailure error
+}
+
+func (r loopReadyFailRuntime) SetReady(ready bool) error {
+	if !ready {
+		return r.readyFailure
+	}
+	return nil
+}
+
 func TestLoopWorkerStartRejectsNilLoop(t *testing.T) {
 	worker := NewLoopWorker(nil)
 	err := worker.Start(withWorkerRuntime(context.Background(), fakeWorkerRuntime{}))
@@ -184,6 +196,35 @@ func TestLoopWorkerLoopCanMarkReadyWhenAutoReadyDisabled(t *testing.T) {
 	}
 	if !snapshot.Status.Ready {
 		t.Fatal("worker ready = false, want true")
+	}
+}
+
+func TestLoopWorkerAutoReadyDisabledSetsNotReadyBeforeLoop(t *testing.T) {
+	readyFailure := errors.New("ready false failed")
+	worker := NewLoopWorker(
+		func(ctx context.Context, _ WorkerRuntime) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		WithLoopAutoReady(false),
+	)
+
+	err := worker.Start(withWorkerRuntime(context.Background(), loopReadyFailRuntime{
+		readyFailure: readyFailure,
+	}))
+	if !errors.Is(err, readyFailure) {
+		t.Fatalf("Start error = %v, want %v", err, readyFailure)
+	}
+
+	worker.mu.Lock()
+	state := worker.state
+	done := worker.done
+	worker.mu.Unlock()
+	if state != loopIdle {
+		t.Fatalf("loop worker state = %s, want %s", state, loopIdle)
+	}
+	if done != nil {
+		t.Fatal("loop worker done channel is set, want nil")
 	}
 }
 
