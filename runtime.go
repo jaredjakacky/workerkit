@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	retrykit "github.com/jaredjakacky/workerkit-incubator/retry"
+	retrykit "github.com/jaredjakacky/workerkit/retry"
 )
 
 var (

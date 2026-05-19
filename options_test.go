@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	retrykit "github.com/jaredjakacky/workerkit-incubator/retry"
+	retrykit "github.com/jaredjakacky/workerkit/retry"
 )
 
 func TestDefaultRuntimeAndWorkerConfig(t *testing.T) {

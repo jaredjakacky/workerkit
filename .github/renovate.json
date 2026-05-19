@@ -47,7 +47,7 @@
       "depNameTemplate": "go-floor",
       "versioningTemplate": "semver-coerced",
       "matchStrings": [
-        "\\[!\\[Go Support\\]\\(https://img\\.shields\\.io/badge/go%20support-(?<currentValue>\\d+\\.\\d+)\\.x%20%7C%20\\d+\\.\\d+\\.x-[A-Za-z0-9]+\\)\\]\\(https://github\\.com/jaredjakacky/workerkit-incubator/actions/workflows/ci\\.yaml\\)"
+        "\\[!\\[Go Support\\]\\(https://img\\.shields\\.io/badge/go%20support-(?<currentValue>\\d+\\.\\d+)\\.x%20%7C%20\\d+\\.\\d+\\.x-[A-Za-z0-9]+\\)\\]\\(https://github\\.com/jaredjakacky/workerkit/actions/workflows/ci\\.yaml\\)"
       ]
     },
     {
@@ -57,7 +57,7 @@
       "depNameTemplate": "go-latest",
       "versioningTemplate": "semver-coerced",
       "matchStrings": [
-        "\\[!\\[Go Support\\]\\(https://img\\.shields\\.io/badge/go%20support-\\d+\\.\\d+\\.x%20%7C%20(?<currentValue>\\d+\\.\\d+)\\.x-[A-Za-z0-9]+\\)\\]\\(https://github\\.com/jaredjakacky/workerkit-incubator/actions/workflows/ci\\.yaml\\)"
+        "\\[!\\[Go Support\\]\\(https://img\\.shields\\.io/badge/go%20support-\\d+\\.\\d+\\.x%20%7C%20(?<currentValue>\\d+\\.\\d+)\\.x-[A-Za-z0-9]+\\)\\]\\(https://github\\.com/jaredjakacky/workerkit/actions/workflows/ci\\.yaml\\)"
       ]
     },
     {
