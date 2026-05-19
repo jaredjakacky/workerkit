@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/jaredjakacky/servekit"
-	workerkit "github.com/jaredjakacky/workerkit-incubator"
+	workerkit "github.com/jaredjakacky/workerkit"
 )
 
 func TestMountValidatesInputs(t *testing.T) {
