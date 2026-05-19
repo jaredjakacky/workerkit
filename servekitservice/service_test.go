@@ -361,6 +361,66 @@ func TestShutdownWorkersUsesStopFallbackAfterIdleWaitTimeout(t *testing.T) {
 	}
 }
 
+func TestShutdownWorkersFallbackDoesNotLeaveDeadlineFailure(t *testing.T) {
+	t.Parallel()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var stops atomic.Int32
+	rt := newTestRuntime(t)
+	if err := rt.Register(
+		workerkit.WorkerSpec{
+			Name: "worker",
+			Worker: testWorker{
+				stop: func(ctx context.Context) error {
+					stops.Add(1)
+					return ctx.Err()
+				},
+			},
+		},
+		workerkit.WithCommand("block", workerkit.CommandHandlerFunc(func(context.Context, workerkit.CommandRequest) (workerkit.CommandResult, error) {
+			close(entered)
+			<-release
+			return workerkit.CommandResult{}, nil
+		})),
+	); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "worker"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	dispatchDone := make(chan error, 1)
+	go func() {
+		_, err := rt.Dispatch(context.Background(), workerkit.CommandRequest{Worker: "worker", Name: "block"})
+		dispatchDone <- err
+	}()
+	<-entered
+
+	service := newTestService(t, rt, WithShutdownTimeout(time.Millisecond))
+	err := service.shutdownWorkers(context.Background())
+	close(release)
+	if dispatchErr := <-dispatchDone; dispatchErr != nil {
+		t.Fatalf("Dispatch returned error: %v", dispatchErr)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdownWorkers error = %v, want DeadlineExceeded", err)
+	}
+	if got := stops.Load(); got != 1 {
+		t.Fatalf("stop calls = %d, want 1", got)
+	}
+	snapshot, ok := rt.Worker("worker")
+	if !ok {
+		t.Fatal("worker missing")
+	}
+	status := snapshot.Status
+	if status.State != workerkit.StateStopped {
+		t.Fatalf("worker state = %s, want %s", status.State, workerkit.StateStopped)
+	}
+	if status.LastFailure != nil {
+		t.Fatalf("LastFailure = %#v, want nil", status.LastFailure)
+	}
+}
+
 func TestRunRejectsInvalidService(t *testing.T) {
 	t.Parallel()
 
