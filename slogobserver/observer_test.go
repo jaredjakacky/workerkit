@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	workerkit "github.com/jaredjakacky/workerkit-incubator"
+	workerkit "github.com/jaredjakacky/workerkit"
 )
 
 type captureHandler struct {

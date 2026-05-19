@@ -4,7 +4,7 @@ import (
 	"context"
 	"log/slog"
 
-	workerkit "github.com/jaredjakacky/workerkit-incubator"
+	workerkit "github.com/jaredjakacky/workerkit"
 )
 
 type config struct {
