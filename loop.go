@@ -167,6 +167,11 @@ func (w *LoopWorker) Start(ctx context.Context) error {
 			return err
 		}
 	}
+	if !w.autoReady {
+		if err := runtime.SetReady(false); err != nil {
+			return err
+		}
+	}
 
 	// Preserve Start context values for telemetry/correlation, but detach from
 	// Start cancellation because the loop outlives the Start call. Stop uses this
@@ -179,7 +184,7 @@ func (w *LoopWorker) Start(ctx context.Context) error {
 	go w.runLoop(loopCtx, runtime, done)
 
 	if !w.autoReady {
-		return runtime.SetReady(false)
+		return nil
 	}
 	if err := runtime.SetReady(true); err != nil {
 		w.markStopping(done)
