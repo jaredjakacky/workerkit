@@ -6,21 +6,25 @@
 [![License](https://img.shields.io/github/license/jaredjakacky/workerkit)](https://github.com/jaredjakacky/workerkit/blob/main/LICENSE)
 
 ## Overview
-Workerkit is a transport-agnostic Go runtime for long-running workers, background loops, pollers, subscribers, and worker-owned commands.
+Workerkit is a transport-agnostic Go runtime for domain workers: long-running loops, pollers, subscribers, command-driven workers, and other worker-oriented service components.
 
 It gives ordinary Go workers a real production shell: lifecycle control, readiness, graceful shutdown, retries, jitter, concurrency limits, failure policy, panic handling, status inspection, and structured observability — without turning your service into a framework.
 
-If your service owns background work that actually matters, Workerkit gives it the same kind of operational story HTTP servers already expect.
+If your service owns domain workers that actually matter, Workerkit gives them the same kind of operational story HTTP servers already expect.
 
 ## Why Workerkit exists
 
-You have been here before.
+Worker-oriented services deserve the same kind of coherent runtime story that HTTP services already expect.
 
-A background worker starts as a goroutine and a `sync.WaitGroup`. Then it needs a readiness flag so the load balancer knows when it is warm. Then it needs a drain signal for deploys. Then it needs bounded shutdown because `context.Background()` is no longer acceptable at 3am. Then someone wants to trigger a cache refresh without SSHing into the pod. Then you need retry logic that does not thundering-herd your database. Then the on-call rotation wants to know why the worker is stuck, and the answer is buried in logs nobody thought to structure.
+The hard part is not starting a goroutine. The hard part is everything that appears after the goroutine matters: lifecycle, readiness, deploy drain, shutdown deadlines, retry policy, failure visibility, status inspection, command routing, concurrency limits, panic recovery, and useful telemetry.
 
-Six months later you have a bespoke runtime duct-taped to one service, and the next service builds a slightly different one.
+Those concerns are not domain logic, but they show up in every production service that owns workers. Without a runtime, they tend to spread across channels, health flags, admin handlers, retry loops, shutdown hooks, and disconnected logs.
 
-Workerkit is that runtime, built once and done right. Register your workers, get the production shell for free, and keep writing normal Go.
+Workerkit pulls that operational layer into one reusable runtime. Applications register workers, define the policies that matter, and keep the worker code focused on domain behavior.
+
+A Workerkit worker is still normal Go code. It can run a long-lived loop, watch external systems, consume from a broker, poll an API, maintain in-memory state, or expose domain-specific commands. Workerkit does not decide what the worker does. It gives the worker a predictable operational envelope.
+
+Workerkit also stands next to `servekit` instead of reinventing an HTTP service layer. When a service needs an operations plane, the optional `opshttp` package mounts Workerkit status, inspection, command discovery, command dispatch, and readiness integration into a Servekit server. Servekit keeps owning the HTTP baseline. Workerkit adds worker-aware operations.
 
 ## What you get
 
@@ -38,7 +42,7 @@ With one runtime, Workerkit gives you:
 - optional `slog` and OpenTelemetry adapters
 - optional Servekit-backed HTTP operations routes
 
-This is the operational layer teams rebuild around every serious background worker. Workerkit makes it the baseline instead of the afterthought.
+This is the operational layer teams rebuild around serious worker components. Workerkit makes it the baseline instead of the afterthought.
 
 ## What Workerkit is not
 
@@ -54,7 +58,7 @@ And Workerkit is not fundamentally tied to HTTP. The core runtime is transport-a
 
 Workerkit is a good fit when:
 
-- your service runs long-lived workers, pollers, subscribers, schedulers, or background loops that need explicit operational control
+- your service runs domain workers, long-lived loops, pollers, subscribers, schedulers, or command-driven workers that need explicit operational control
 - you want one runtime to own lifecycle, readiness, shutdown, status, retries, failure handling, concurrency limits, and observability
 - your workers own business logic, but you want a consistent production shell around them
 - some workers expose operational or domain commands like `index/rebuild`, `cache/refresh`, `snapshot/prune`, or `queue/drain`
@@ -144,7 +148,7 @@ func main() {
 }
 ```
 
-That one runtime already gives you a lot more than "start a goroutine and hope for the best":
+That one runtime already gives you the operational pieces that usually get rebuilt around production workers:
 
 - explicit worker registration
 - managed startup and graceful shutdown
