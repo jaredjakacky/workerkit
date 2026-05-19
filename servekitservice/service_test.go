@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/jaredjakacky/servekit"
-	workerkit "github.com/jaredjakacky/workerkit-workerkit"
-	"github.com/jaredjakacky/workerkit-workerkit/opshttp"
+	workerkit "github.com/jaredjakacky/workerkit"
+	"github.com/jaredjakacky/workerkit/opshttp"
 )
 
 type testWorker struct {

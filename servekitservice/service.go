@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/jaredjakacky/servekit"
-	workerkit "github.com/jaredjakacky/workerkit-workerkit"
-	"github.com/jaredjakacky/workerkit-workerkit/opshttp"
+	workerkit "github.com/jaredjakacky/workerkit"
+	"github.com/jaredjakacky/workerkit/opshttp"
 )
 
 // stopFallbackTimeout is used only after the main service shutdown budget has
