@@ -24,7 +24,7 @@ Workerkit pulls that operational layer into one reusable runtime. Applications r
 
 A Workerkit worker is still normal Go code. It can run a long-lived loop, watch external systems, consume from a broker, poll an API, maintain in-memory state, or expose domain-specific commands. Workerkit does not decide what the worker does. It gives the worker a predictable operational envelope.
 
-Workerkit also stands next to `servekit` instead of reinventing an HTTP service layer. When a service needs an operations plane, the optional `opshttp` package mounts Workerkit status, inspection, command discovery, command dispatch, and readiness integration into a Servekit server. Servekit keeps owning the HTTP baseline. Workerkit adds worker-aware operations.
+Workerkit also stands next to [Servekit](https://github.com/jaredjakacky/servekit) instead of reinventing an HTTP service layer. When a service needs an operations plane, the optional `opshttp` package mounts Workerkit status, inspection, command discovery, command dispatch, and readiness integration into a Servekit server. Servekit keeps owning the HTTP baseline. Workerkit adds worker-aware operations.
 
 ## What you get
 
@@ -233,7 +233,7 @@ The advanced path is documented in [docs/advanced.md](docs/advanced.md), with po
 
 ## Servekit operations plane
 
-Workerkit and Servekit can be used independently, but the optional `opshttp` package provides the canonical bridge between them.
+Workerkit and [Servekit](https://github.com/jaredjakacky/servekit) can be used independently, but the optional `opshttp` package provides the canonical bridge between them.
 
 Servekit owns the HTTP service baseline: server construction, middleware, authentication, readiness endpoints, request policy, endpoint timeouts, response handling, and service lifecycle. Workerkit owns worker runtime semantics: lifecycle, readiness, status, command dispatch, admission, failure policy, and telemetry.
 
