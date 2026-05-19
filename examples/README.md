@@ -1,106 +1,74 @@
 # Workerkit Examples
 
-This page is the directory index for Workerkit's runnable examples.
+Workerkit is a transport-agnostic worker runtime for Go. These examples are the fastest way to understand what that means in practice — starting from a single worker with graceful shutdown, ending with a production-grade composition that includes retries, concurrency limits, failure policy, structured observability, HTTP ops, and Kubernetes-ready lifecycle management.
 
-These examples are part of the public documentation, not just smoke-test
-programs.
-
-Use this page when you want the short version: what examples exist, what each
-one demonstrates, and what to run next.
+Every example is runnable. Every example is part of the public documentation. None of them are smoke tests.
 
 If you want the fuller narrative walkthrough, start with the [Examples Guide](../docs/examples.md).
 
-Read the examples as a progression from the core transport-agnostic Workerkit
-runtime outward into lifecycle, readiness, commands, policy, observability, and
-Servekit-backed service integration.
+## The Progression
 
-## Read Order
+Read the examples in the order listed below. Each one builds on the last. By the end you will have a complete mental model of how a production Workerkit service is assembled — layer by layer, from the core runtime outward.
 
-1. [basic](basic)
-2. [loop-worker](loop-worker)
-3. [readiness](readiness)
-4. [commands](commands)
-5. [retry-policy](retry-policy)
-6. [concurrency-limits](concurrency-limits)
-7. [failure-policy](failure-policy)
-8. [multi-worker](multi-worker)
-9. [testing](testing)
-10. [observability-slog](observability-slog)
-11. [observability-otel](observability-otel)
-12. [managed-service](managed-service)
-13. [opshttp-basic](opshttp-basic)
-14. [opshttp-commands](opshttp-commands)
-15. [admin-lifecycle](admin-lifecycle)
-16. [production-composition](production-composition)
+### Core Runtime
 
-## What Each Example Shows
+**[basic](basic)** — Zero to running in under 50 lines. One worker, one runtime, start, status, graceful shutdown. No HTTP, no framework. This is what Workerkit actually is before anything else is layered on.
 
-- [basic](basic)
-  The smallest credible Workerkit program: one custom worker, one runtime,
-  registration, startup, status, and graceful shutdown without Servekit.
-- [loop-worker](loop-worker)
-  The managed long-running loop story: `NewLoopWorker`, ticker-based work,
-  context cancellation, status, and clean shutdown.
-- [readiness](readiness)
-  The focused readiness story: running does not imply ready, and aggregate
-  runtime readiness depends on readiness-contributing workers.
-- [commands](commands)
-  Worker-owned domain commands without HTTP: discovery, direct dispatch, JSON
-  payload bytes, result payload bytes, and command failure status.
-- [retry-policy](retry-policy)
-  Production-grade retry policy: bounded attempts, exponential backoff, full
-  jitter, and retry predicates for temporary failures.
-- [concurrency-limits](concurrency-limits)
-  Layered command backpressure with runtime-wide and worker-local concurrency
-  limits.
-- [failure-policy](failure-policy)
-  How isolated worker failure, runtime-unready failure, and runtime-failed
-  policy affect aggregate status.
-- [multi-worker](multi-worker)
-  One service boundary with `ingest`, `index`, and `maintenance` workers,
-  shared lifecycle, independent inspection, command routing, and readiness.
-- [testing](testing)
-  The test-first story: Workerkit core can be tested directly with fake workers,
-  direct dispatch, status assertions, readiness assertions, and a custom
-  observer.
-- [observability-slog](observability-slog)
-  Backend-neutral Workerkit observer events mapped into production-friendly
-  structured `slog` records.
-- [observability-otel](observability-otel)
-  Workerkit observer events flowing into OpenTelemetry spans, events, counters,
-  and histograms while the runtime remains transport-agnostic.
-- [managed-service](managed-service)
-  The preferred microservice shell path with `servekitservice.NewManaged`,
-  normal application routes, readiness, signal handling, and graceful shutdown.
-- [opshttp-basic](opshttp-basic)
-  The first Kit-series HTTP composition: Servekit exposes read-only Workerkit
-  runtime status, worker inspection, command discovery, and readiness.
-- [opshttp-commands](opshttp-commands)
-  Opt-in HTTP command dispatch through `opshttp`, including success, invalid
-  requests, missing targets, saturation mapping, and placeholder dispatch
-  endpoint policy.
-- [admin-lifecycle](admin-lifecycle)
-  Privileged worker and runtime lifecycle controls over HTTP with placeholder
-  auth, audit, body limit, timeout policy, and workers intentionally left
-  registered but not running until started through lifecycle routes.
-- [production-composition](production-composition)
-  The flagship composition: multiple workers, readiness, commands, retry,
-  concurrency, failure policy, slog observability, Servekit service lifecycle,
-  protected read-only and mutating ops, and graceful shutdown.
+**[loop-worker](loop-worker)** — The long-running background process story. `NewLoopWorker` with a ticker, context cancellation on drain, and clean shutdown. This is the bread-and-butter worker type.
 
-## Why This Structure Exists
+**[readiness](readiness)** — Running is not the same as ready. This example shows how individual worker readiness rolls up to aggregate runtime readiness, and why that distinction matters for traffic management and health checks.
 
-The examples are intentionally organized to answer five reader questions:
+### Commands, Policy, and Backpressure
+
+**[commands](commands)** — Workers own their own command surface. No HTTP required. Direct dispatch, JSON payload bytes in and out, result handling, and command failure status. This is where Workerkit starts to feel different.
+
+**[retry-policy](retry-policy)** — Bounded attempts, exponential backoff, full jitter, and retry predicates. The building blocks for resilient distributed operations. Run this before you write a single retry loop by hand again.
+
+**[concurrency-limits](concurrency-limits)** — Layered backpressure. Runtime-wide limits and worker-local limits composing together. This is how you protect a service from being its own thundering herd.
+
+**[failure-policy](failure-policy)** — What happens when a worker fails. Isolated failure, runtime-unready semantics, and runtime-failed policy. Understanding this example is understanding how Workerkit handles the bad path.
+
+### Multi-Worker Composition
+
+**[multi-worker](multi-worker)** — One service boundary, three workers: `ingest`, `index`, `maintenance`. Shared lifecycle, independent inspection, command routing by worker, and aggregate readiness. This is the shape most real services take.
+
+### Testing and Observability
+
+**[testing](testing)** — Workerkit is testable without mocks, HTTP servers, or test harnesses. Fake workers, direct dispatch, status assertions, readiness assertions, and a custom observer in plain Go test code.
+
+**[observability-slog](observability-slog)** — Workerkit emits structured observer events. This example maps them into production-friendly `slog` records: lifecycle transitions, readiness changes, command completions, and failures.
+
+**[observability-otel](observability-otel)** — The same observer events flowing into OpenTelemetry. Command spans with timing and attributes, lifecycle events on parent spans, dispatch counters, duration histograms. The runtime never touches OTel directly — the adapter does.
+
+### Servekit Integration
+
+**[managed-service](managed-service)** — The preferred microservice shell. `servekitservice.NewManaged` wires Workerkit readiness into `/readyz` automatically, starts workers before serving, and drains and stops them gracefully on shutdown. Add your application routes and ship it.
+
+**[opshttp-basic](opshttp-basic)** — One `opshttp.Mount` call exposes runtime status, worker inspection, command discovery, and readiness over HTTP. Read-only by default. No lifecycle mutation without explicit opt-in.
+
+**[opshttp-commands](opshttp-commands)** — Opt-in HTTP command dispatch. Includes success paths, invalid request handling, missing target mapping, saturation responses, and how to apply endpoint policy to the dispatch route specifically.
+
+**[admin-lifecycle](admin-lifecycle)** — Privileged lifecycle controls over HTTP. Workers registered but not started — started, drained, and stopped through lifecycle routes. Includes placeholder auth, audit, and timeout policy to show where your own policy plugs in.
+
+### The Full Picture
+
+**[production-composition](production-composition)** — Everything at once. Multiple workers, readiness, commands, retry, concurrency limits, failure policy, slog observability, Servekit service lifecycle, protected read-only ops, opt-in mutating ops, and graceful shutdown. This is the target shape for a production Workerkit service.
+
+---
+
+## Why This Order
+
+The examples move from the core runtime outward deliberately. HTTP is not where Workerkit starts — it is where it ends up. A runtime that requires a framework to be useful is a framework. Workerkit is a runtime.
+
+The progression answers five questions in order:
 
 - "What is the shortest useful Workerkit runtime?"
-- "How do lifecycle, readiness, commands, retry, limits, and failure policy work
-  before HTTP enters the picture?"
+- "How do lifecycle, readiness, commands, retry, limits, and failure policy work before HTTP enters the picture?"
 - "How do I test and observe Workerkit as a transport-agnostic runtime?"
-- "How does Servekit expose Workerkit safely as an HTTP/service shell?"
-- "What does the full production-style composition look like?"
+- "How does Servekit expose Workerkit safely as an HTTP service shell?"
+- "What does the full production composition look like?"
 
-That is why the examples move from core runtime behavior outward instead of
-starting with HTTP.
+---
 
 ## Run Them
 
@@ -112,6 +80,7 @@ go run ./examples/<name>
 # for example
 go run ./examples/basic
 go run ./examples/commands
+go run ./examples/multi-worker
 go run ./examples/opshttp-basic
 go run ./examples/production-composition
 
@@ -119,6 +88,4 @@ go run ./examples/production-composition
 go test ./examples/testing
 ```
 
-Each runnable example prints useful commands or output on startup. The source
-comments in each `main.go` explain the purpose of the example and the behavior
-worth noticing.
+Each example prints its own output and startup notes. The source comments in each `main.go` explain what to look for while it runs.

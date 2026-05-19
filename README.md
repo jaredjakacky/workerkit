@@ -6,57 +6,68 @@
 [![License](https://img.shields.io/github/license/jaredjakacky/workerkit)](https://github.com/jaredjakacky/workerkit/blob/main/LICENSE)
 
 ## Overview
+Workerkit is a transport-agnostic Go runtime for long-running workers, background loops, pollers, subscribers, and worker-owned commands.
 
-Workerkit is a small Go package for running domain workers with a production-oriented operational baseline from the first constructor call.
+It gives ordinary Go workers a real production shell: lifecycle control, readiness, graceful shutdown, retries, jitter, concurrency limits, failure policy, panic handling, status inspection, and structured observability — without turning your service into a framework.
 
-It gives ordinary Go workers explicit lifecycle control, readiness, graceful shutdown, worker-owned command handling, retries, jitter, concurrency limits, panic and failure policy, status inspection, and structured observability.
-
-Workerkit is useful when a service has long-running workers, background loops, pollers, subscribers, scheduled background work, or operational commands that need to behave like first-class production components. The worker owns the business logic: its loop, input sources, side effects, and domain rules. Workerkit owns the operational shell around it: how it starts, stops, reports readiness, accepts commands, records failure, and exposes status.
-
-Workerkit is not a workflow engine, job queue, scheduler, or durable orchestration system. It does not store workflow state, claim ownership of your domain model, or replace infrastructure such as queues, databases, brokers, or orchestrators. You still write normal Go workers. Workerkit exists so you do not have to rebuild the same lifecycle, readiness, shutdown, retry, telemetry, command, and inspection layer around each one.
-
-Workerkit also keeps HTTP out of the core runtime. The core package is transport-agnostic: workers and commands are ordinary Go interfaces and structs. When you want an HTTP operations plane, the optional `opshttp` package mounts Workerkit routes into a Servekit server for runtime status, worker inspection, command discovery, command dispatch, and readiness integration. That keeps Servekit responsible for the HTTP service baseline while Workerkit adds worker-aware operations.
-
-Lifecycle control and worker commands are intentionally separate. Starting, draining, and stopping workers are runtime control operations. Worker commands are domain operations owned and registered by individual workers.
+If your service owns background work that actually matters, Workerkit gives it the same kind of operational story HTTP servers already expect.
 
 ## Why Workerkit exists
 
-Worker-oriented services deserve the same kind of coherent runtime story that HTTP services already expect.
+You have been here before.
 
-Once background work becomes a real service capability, a goroutine is not enough. Teams need a consistent way to start and stop workers, report readiness, drain work, expose status, handle failures, bound retries, limit concurrency, recover from panics, and emit useful telemetry.
+A background worker starts as a goroutine and a `sync.WaitGroup`. Then it needs a readiness flag so the load balancer knows when it is warm. Then it needs a drain signal for deploys. Then it needs bounded shutdown because `context.Background()` is no longer acceptable at 3am. Then someone wants to trigger a cache refresh without SSHing into the pod. Then you need retry logic that does not thundering-herd your database. Then the on-call rotation wants to know why the worker is stuck, and the answer is buried in logs nobody thought to structure.
 
-Those concerns are not domain logic, but they show up in every production service that owns background work. Workerkit pulls them into one reusable runtime so applications can register workers and start from a consistent operational baseline instead of rebuilding lifecycle and control code one service at a time.
+Six months later you have a bespoke runtime duct-taped to one service, and the next service builds a slightly different one.
 
-A Workerkit worker is still normal Go code. It can run a long-lived loop, watch external systems, consume from a broker, poll an API, react to channels, maintain in-memory state, or expose domain-specific commands. Workerkit does not decide what the worker does. It gives the worker a predictable operational envelope.
+Workerkit is that runtime, built once and done right. Register your workers, get the production shell for free, and keep writing normal Go.
 
-Workerkit also stands next to `servekit` instead of reinventing an HTTP service layer. When a service needs an operations plane, the optional `opshttp` package mounts Workerkit status, inspection, command discovery, command dispatch, and readiness integration into a Servekit server. Servekit keeps owning the HTTP baseline. Workerkit adds worker-aware operations.
+## What you get
+
+With one runtime, Workerkit gives you:
+
+- explicit worker registration
+- startup, drain, and graceful shutdown
+- aggregate runtime status and per-worker snapshots
+- readiness reporting and readiness aggregation
+- worker-owned command registration and direct dispatch
+- bounded retry with backoff and jitter
+- runtime-wide and worker-local concurrency limits
+- panic and failure policy
+- structured observer hooks
+- optional `slog` and OpenTelemetry adapters
+- optional Servekit-backed HTTP operations routes
+
+This is the operational layer teams rebuild around every serious background worker. Workerkit makes it the baseline instead of the afterthought.
 
 ## What Workerkit is not
 
-Workerkit is not a workflow engine, job queue, scheduler, or fleet-wide orchestrator. It does not provide durable workflow state, queue storage, distributed leasing, task assignment, or cross-service coordination. Those systems can exist around a Workerkit service. Workerkit’s focus is the runtime and control surface for workers inside one service boundary.
+Workerkit is not a workflow engine, job queue, scheduler, or durable orchestration system.
 
-Workerkit is also not an application framework. It does not replace your domain logic, dependency wiring, persistence model, message broker, or service-specific behavior. You still write the workers, their business loops, and the commands they choose to expose. Workerkit does not know what a blob, trade, index, model, invoice, or account means.
+It does not provide durable workflow state, queue persistence, distributed leasing, task assignment, or cross-service coordination. It does not replace brokers, databases, schedulers, or orchestrators. It does not own your domain model.
 
-Workerkit is not tied to HTTP as its core identity. The runtime is transport-agnostic: lifecycle, readiness, status, commands, failure handling, and telemetry are ordinary Go concepts first. When HTTP is useful, the optional `opshttp` package mounts a Servekit-backed operations plane. When it is not, the same runtime can be used directly from Go code, CLIs, tests, or another control surface.
+It is also not an application framework. You still write normal Go workers, your own business loops, your own side effects, and your own command contracts. Workerkit is the runtime and control surface around those workers, not the application itself.
+
+And Workerkit is not fundamentally tied to HTTP. The core runtime is transport-agnostic. Commands, readiness, lifecycle, failure handling, and status all exist as ordinary Go concepts first. If you want an HTTP operations plane, the optional `opshttp` package mounts one into Servekit. If you do not, the same runtime works directly from Go code, tests, or another control surface.
 
 ## Good fit / not a fit
 
 Workerkit is a good fit when:
 
-- your service runs background workers, pollers, subscribers, scheduled workers, or long-lived loops that need explicit lifecycle management
-- you want one runtime to own worker startup, drain, shutdown, readiness, status, failure handling, retries, concurrency limits, and observability inside a service boundary
-- your workers own their business logic, input sources, side effects, and domain rules, but you want a consistent operational shell around them
-- some workers expose operational or domain commands, such as `cache/refresh`, `queue/drain`, `index/rebuild`, or `snapshot/prune`
-- you want a transport-agnostic worker core with the option to add a Servekit-backed operations plane when HTTP is useful
-- you want production-oriented defaults without turning your worker code into a framework-specific application model
+- your service runs long-lived workers, pollers, subscribers, schedulers, or background loops that need explicit operational control
+- you want one runtime to own lifecycle, readiness, shutdown, status, retries, failure handling, concurrency limits, and observability
+- your workers own business logic, but you want a consistent production shell around them
+- some workers expose operational or domain commands like `index/rebuild`, `cache/refresh`, `snapshot/prune`, or `queue/drain`
+- you want a transport-agnostic worker runtime with the option to add an HTTP operations surface when HTTP is useful
+- you want production-oriented defaults without adopting a full framework
 
 Workerkit is probably not a fit when:
 
-- you want a library that provides a durable workflow engine, job queue, scheduler, distributed lock manager, or fleet-wide orchestrator out of the box
-- you want built-in persistence for workflow state, queue state, task assignment, retries across process restarts, or cross-service coordination
-- you want the runtime to understand, validate, or enforce your business domain rules instead of leaving those rules inside your workers
-- your service already has a mature worker runtime and operations model that Workerkit would mostly duplicate
-- you only need a tiny helper around one short-lived goroutine, not a managed runtime with lifecycle, readiness, status, commands, and failure semantics
+- you need a durable workflow engine, queue system, distributed lock manager, or fleet-wide orchestrator
+- you want built-in persistence for workflow state, retries across restarts, or task coordination across services
+- you want the runtime to understand and enforce your business domain instead of leaving that logic inside your workers
+- your service already has a mature worker runtime and Workerkit would mostly duplicate it
+- you only need a tiny helper around one short-lived goroutine, not a managed runtime
 
 ## Installation
 
@@ -133,18 +144,17 @@ func main() {
 }
 ```
 
-That one runtime already gives you:
+That one runtime already gives you a lot more than "start a goroutine and hope for the best":
 
 - explicit worker registration
-- managed startup and shutdown
-- aggregate runtime status
-- per-worker status snapshots
+- managed startup and graceful shutdown
+- aggregate runtime status and per-worker snapshots
 - readiness aggregation
-- graceful drain before stop
-- production-oriented failure and panic handling
+- drain-before-stop behavior
+- production-oriented panic and failure handling
 - extension points for commands, retry, concurrency limits, and observers
 
-In practice, you get a real worker runtime without hand-building lifecycle state, readiness bookkeeping, shutdown ordering, status inspection, command admission, and failure reporting yourself.
+In practice, you get a real worker runtime without hand-building lifecycle bookkeeping, readiness flags, shutdown ordering, status inspection, command admission, and failure reporting yourself.
 
 ## The Core Model
 
@@ -162,8 +172,8 @@ Most services should start with one runtime.
 
 ```go
 type Worker interface {
-	Start(context.Context) error
-	Stop(context.Context) error
+    Start(context.Context) error
+    Stop(context.Context) error
 }
 ```
 
@@ -193,12 +203,12 @@ Register commands with `WithCommand` or `WithCommandSpec`, discover them with `R
 Workerkit rests on three choices:
 
 1. It keeps worker code ordinary Go.
-2. It gives background work a coherent operational envelope.
+2. It gives worker-oriented service components a coherent operational envelope.
 3. It keeps HTTP optional and outside the core runtime.
 
-That is why the package can stay small without treating background work as an unmanaged implementation detail.
+That is why the package can stay small while still feeling production-ready from the first constructor call.
 
-## Advanced Capabilities
+## Advanced capabilities
 
 Workerkit has a short normal path, but it is not limited to startup and shutdown. Advanced hooks include:
 
@@ -227,19 +237,19 @@ Servekit owns the HTTP service baseline: server construction, middleware, authen
 
 ```go
 server := servekit.New(
-	servekit.WithAddr(":8080"),
-	servekit.WithReadinessChecks(opshttp.ReadinessCheck(runtime)),
+    servekit.WithAddr(":8080"),
+    servekit.WithReadinessChecks(opshttp.ReadinessCheck(runtime)),
 )
 
 err := opshttp.Mount(server, runtime,
-	opshttp.WithEndpointOptions(
-		servekit.WithAuthGate(requireOpsCaller),
-		servekit.WithEndpointTimeout(10*time.Second),
-	),
-	opshttp.WithCommandDispatchEnabled(),
-	opshttp.WithDispatchOptions(
-		servekit.WithBodyLimit(1 << 20),
-	),
+    opshttp.WithEndpointOptions(
+        servekit.WithAuthGate(requireOpsCaller),
+        servekit.WithEndpointTimeout(10*time.Second),
+    ),
+    opshttp.WithCommandDispatchEnabled(),
+    opshttp.WithDispatchOptions(
+        servekit.WithBodyLimit(1 << 20),
+    ),
 )
 ```
 
