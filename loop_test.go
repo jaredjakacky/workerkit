@@ -149,11 +149,13 @@ func TestLoopWorkerAutoReadyMarksWorkerReadyByDefault(t *testing.T) {
 }
 
 func TestLoopWorkerLoopCanMarkReadyWhenAutoReadyDisabled(t *testing.T) {
+	readySet := make(chan struct{})
 	worker := NewLoopWorker(
 		func(ctx context.Context, runtime WorkerRuntime) error {
 			if err := runtime.SetReady(true); err != nil {
 				return err
 			}
+			close(readySet)
 			<-ctx.Done()
 			return ctx.Err()
 		},
@@ -170,7 +172,16 @@ func TestLoopWorkerLoopCanMarkReadyWhenAutoReadyDisabled(t *testing.T) {
 		_ = rt.Stop(context.Background(), "loop")
 	})
 
-	snapshot := waitForLoopReady(t, rt, true)
+	select {
+	case <-readySet:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for loop to mark ready")
+	}
+
+	snapshot, ok := rt.Worker("loop")
+	if !ok {
+		t.Fatal("Worker missing loop")
+	}
 	if !snapshot.Status.Ready {
 		t.Fatal("worker ready = false, want true")
 	}
@@ -377,27 +388,6 @@ func waitForLoopState(t *testing.T, rt *Runtime, want LifecycleState) WorkerSnap
 		select {
 		case <-deadline:
 			t.Fatalf("worker state did not become %s, last snapshot %#v", want, snapshot)
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
-}
-
-func waitForLoopReady(t *testing.T, rt *Runtime, want bool) WorkerSnapshot {
-	t.Helper()
-
-	deadline := time.After(200 * time.Millisecond)
-	for {
-		snapshot, ok := rt.Worker("loop")
-		if !ok {
-			t.Fatal("Worker missing loop")
-		}
-		if snapshot.Status.Ready == want {
-			return snapshot
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("worker ready did not become %v, last snapshot %#v", want, snapshot)
 		default:
 			time.Sleep(time.Millisecond)
 		}
