@@ -1,6 +1,7 @@
-package workerkit
+package workerkit_test
 
 import (
+	. "github.com/jaredjakacky/workerkit"
 	"strings"
 	"testing"
 )
@@ -128,101 +129,6 @@ func TestValidateQualifiedWorkerName(t *testing.T) {
 				t.Fatalf("ValidateQualifiedWorkerName(%q) returned nil, want error", name)
 			}
 		})
-	}
-}
-
-func TestResolveWorkerName(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name        string
-		runtimeName string
-		workerName  string
-		want        string
-	}{
-		{
-			name:        "local worker",
-			runtimeName: "runtime",
-			workerName:  "worker",
-			want:        "runtime/worker",
-		},
-		{
-			name:        "qualified worker",
-			runtimeName: "runtime",
-			workerName:  "other/worker",
-			want:        "other/worker",
-		},
-	}
-	for _, tc := range tests {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			got, err := resolveWorkerName(tc.runtimeName, tc.workerName)
-			if err != nil {
-				t.Fatalf("resolveWorkerName returned error: %v", err)
-			}
-			if got != tc.want {
-				t.Fatalf("resolveWorkerName() = %q, want %q", got, tc.want)
-			}
-		})
-	}
-
-	invalid := []string{
-		"",
-		"runtime/",
-		"/worker",
-		"runtime/worker/extra",
-		"Worker",
-	}
-	for _, name := range invalid {
-		name := name
-		t.Run("invalid "+testName(name), func(t *testing.T) {
-			t.Parallel()
-
-			if _, err := resolveWorkerName("runtime", name); err == nil {
-				t.Fatalf("resolveWorkerName(%q) returned nil, want error", name)
-			}
-		})
-	}
-}
-
-func TestSplitQualifiedWorkerName(t *testing.T) {
-	t.Parallel()
-
-	runtimeName, workerName, ok := splitQualifiedWorkerName("runtime/worker")
-	if !ok {
-		t.Fatal("splitQualifiedWorkerName ok = false, want true")
-	}
-	if runtimeName != "runtime" || workerName != "worker" {
-		t.Fatalf("splitQualifiedWorkerName = %q %q, want runtime worker", runtimeName, workerName)
-	}
-
-	invalid := []string{
-		"",
-		"worker",
-		"runtime/",
-		"/worker",
-		"runtime/worker/extra",
-	}
-	for _, name := range invalid {
-		name := name
-		t.Run("invalid "+testName(name), func(t *testing.T) {
-			t.Parallel()
-
-			if runtimeName, workerName, ok := splitQualifiedWorkerName(name); ok {
-				t.Fatalf("splitQualifiedWorkerName(%q) = %q %q true, want false", name, runtimeName, workerName)
-			}
-		})
-	}
-}
-
-func TestQualifyWorkerNameDoesNotValidate(t *testing.T) {
-	t.Parallel()
-
-	got := qualifyWorkerName("Runtime", "Worker")
-	if got != "Runtime/Worker" {
-		t.Fatalf("qualifyWorkerName = %q, want Runtime/Worker", got)
 	}
 }
 

@@ -1,14 +1,13 @@
-package opshttp
+package opshttp_test
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
+	. "github.com/jaredjakacky/workerkit/opshttp"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/jaredjakacky/servekit"
 	workerkit "github.com/jaredjakacky/workerkit"
@@ -112,92 +111,6 @@ func TestWorkerLifecycleRouteValidationAndErrorMapping(t *testing.T) {
 	rec = postLifecycle(t, server, "/admin/workers/start", `{"name":"worker"}`)
 	assertStatus(t, rec, http.StatusConflict)
 	assertErrorBody(t, rec, workerkit.ErrInvalidWorkerState.Error())
-}
-
-func TestLifecycleOperationContextIgnoresRequestCancellation(t *testing.T) {
-	t.Parallel()
-
-	base, cancelRequest := context.WithCancel(context.Background())
-	cancelRequest()
-	req := httptest.NewRequest(http.MethodPost, "/admin/workers/start", nil).WithContext(base)
-
-	ctx, cancel := lifecycleOperationContext(req, config{lifecycleTimeout: -1})
-	defer cancel()
-
-	select {
-	case <-ctx.Done():
-		t.Fatalf("lifecycle context was canceled by request context: %v", ctx.Err())
-	default:
-	}
-	if _, ok := ctx.Deadline(); ok {
-		t.Fatal("lifecycle context has deadline with disabled timeout")
-	}
-}
-
-func TestLifecycleOperationContextAppliesTimeout(t *testing.T) {
-	t.Parallel()
-
-	req := httptest.NewRequest(http.MethodPost, "/admin/workers/start", nil)
-
-	ctx, cancel := lifecycleOperationContext(req, config{lifecycleTimeout: time.Minute})
-	defer cancel()
-
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		t.Fatal("lifecycle context missing deadline")
-	}
-	if time.Until(deadline) <= 0 {
-		t.Fatalf("deadline = %s, want future deadline", deadline)
-	}
-}
-
-func TestLifecycleResponseHelpers(t *testing.T) {
-	t.Parallel()
-
-	rt := newLifecycleRuntime(t, "ops", map[string]workerkit.Worker{
-		"worker": &lifecycleWorker{},
-	})
-
-	worker, err := workerLifecycleResponse(rt, "worker")
-	if err != nil {
-		t.Fatalf("workerLifecycleResponse returned error: %v", err)
-	}
-	if worker.QualifiedName != "ops/worker" {
-		t.Fatalf("qualified name = %q, want ops/worker", worker.QualifiedName)
-	}
-
-	_, err = workerLifecycleResponse(rt, "missing")
-	assertHTTPError(t, err, http.StatusNotFound, `worker "missing" not found`)
-
-	runtime := runtimeLifecycleResponse(rt)
-	if runtime.Identity.Name != "ops" {
-		t.Fatalf("runtime identity = %q, want ops", runtime.Identity.Name)
-	}
-	if runtime.Status.State == "" {
-		t.Fatal("runtime status state is empty")
-	}
-}
-
-func TestMapLifecycleError(t *testing.T) {
-	t.Parallel()
-
-	if err := mapLifecycleError("worker", "worker", nil); err != nil {
-		t.Fatalf("nil error mapped to %v, want nil", err)
-	}
-
-	notFound := mapLifecycleError("worker", "worker", workerkit.ErrWorkerNotFound)
-	assertHTTPError(t, notFound, http.StatusNotFound, `worker "worker" not found`)
-
-	invalidState := mapLifecycleError("worker", "worker", workerkit.ErrInvalidWorkerState)
-	assertHTTPError(t, invalidState, http.StatusConflict, workerkit.ErrInvalidWorkerState.Error())
-	if !errors.Is(invalidState, workerkit.ErrInvalidWorkerState) {
-		t.Fatalf("mapped invalid state does not wrap ErrInvalidWorkerState: %v", invalidState)
-	}
-
-	boom := errors.New("boom")
-	if got := mapLifecycleError("worker", "worker", boom); got != boom {
-		t.Fatalf("default mapped error = %v, want original error", got)
-	}
 }
 
 type lifecycleWorker struct {

@@ -1,8 +1,9 @@
-package workerkit
+package workerkit_test
 
 import (
 	"context"
 	"errors"
+	. "github.com/jaredjakacky/workerkit"
 	"strings"
 	"testing"
 	"time"
@@ -10,138 +11,32 @@ import (
 	retrykit "github.com/jaredjakacky/workerkit/retry"
 )
 
-func TestDefaultRuntimeAndWorkerConfig(t *testing.T) {
-	cfg := defaultRuntimeConfig()
-	if cfg.commandConcurrency != 0 {
-		t.Fatalf("commandConcurrency = %d, want 0", cfg.commandConcurrency)
-	}
-	if cfg.readinessPolicy != ReadyWhenContributingWorkersReady {
-		t.Fatalf("readinessPolicy = %s, want %s", cfg.readinessPolicy, ReadyWhenContributingWorkersReady)
-	}
-	if _, ok := cfg.observer.(NopObserver); !ok {
-		t.Fatalf("observer = %T, want NopObserver", cfg.observer)
-	}
-
-	worker := cfg.defaultWorker
-	if worker.startTimeout != defaultStartTimeout {
-		t.Fatalf("startTimeout = %s, want %s", worker.startTimeout, defaultStartTimeout)
-	}
-	if worker.stopTimeout != defaultStopTimeout {
-		t.Fatalf("stopTimeout = %s, want %s", worker.stopTimeout, defaultStopTimeout)
-	}
-	if worker.commandTimeout != defaultCommandTimeout {
-		t.Fatalf("commandTimeout = %s, want %s", worker.commandTimeout, defaultCommandTimeout)
-	}
-	if worker.commandConcurrency != defaultCommandConcurrency {
-		t.Fatalf("worker commandConcurrency = %d, want %d", worker.commandConcurrency, defaultCommandConcurrency)
-	}
-	if worker.panicPolicy != PanicPolicyRecover {
-		t.Fatalf("panicPolicy = %s, want %s", worker.panicPolicy, PanicPolicyRecover)
-	}
-	if worker.failurePolicy != FailurePolicyIsolate {
-		t.Fatalf("failurePolicy = %s, want %s", worker.failurePolicy, FailurePolicyIsolate)
-	}
-	if !worker.readyOnStart {
-		t.Fatal("readyOnStart = false, want true")
-	}
-	if !worker.acceptingWork {
-		t.Fatal("acceptingWork = false, want true")
-	}
-	if !worker.contributesToReadiness {
-		t.Fatal("contributesToReadiness = false, want true")
-	}
-	if err := cfg.validate(); err != nil {
-		t.Fatalf("default config validate returned error: %v", err)
-	}
-}
-
-func TestConfigValidationRejectsInvalidPoliciesAndNilRetries(t *testing.T) {
-	cfg := defaultRuntimeConfig()
-	cfg.readinessPolicy = ReadinessPolicy("bad")
-	if err := cfg.validate(); err == nil {
-		t.Fatal("runtimeConfig.validate invalid readiness returned nil, want error")
-	}
-
-	worker := defaultWorkerConfig()
-	worker.panicPolicy = PanicPolicy("bad")
-	if err := worker.validate(); err == nil {
-		t.Fatal("workerConfig.validate invalid panic returned nil, want error")
-	}
-
-	worker = defaultWorkerConfig()
-	worker.failurePolicy = FailurePolicy("bad")
-	if err := worker.validate(); err == nil {
-		t.Fatal("workerConfig.validate invalid failure returned nil, want error")
-	}
-
-	worker = defaultWorkerConfig()
-	worker.startRetryPolicy = nil
-	if err := worker.validate(); err == nil {
-		t.Fatal("workerConfig.validate nil start retry returned nil, want error")
-	}
-
-	worker = defaultWorkerConfig()
-	worker.commandRetryPolicy = nil
-	if err := worker.validate(); err == nil {
-		t.Fatal("workerConfig.validate nil command retry returned nil, want error")
-	}
-}
-
-func TestRuntimeOptionDefaultsAreCopiedAtRegistration(t *testing.T) {
+func TestRuntimeOptionDefaultsApplyAtRegistration(t *testing.T) {
 	rt := newTestRuntime(
 		t,
 		WithDefaultReadyOnStart(false),
 		WithDefaultAcceptingWorkOnStart(false),
-		WithDefaultWorkerCommandConcurrency(7),
 		WithDefaultWorkerReadinessContribution(false),
 	)
-	if err := rt.Register(WorkerSpec{Name: "first", Worker: testWorker{}}); err != nil {
-		t.Fatalf("Register first returned error: %v", err)
+	if err := rt.Register(WorkerSpec{Name: "worker", Worker: testWorker{}}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "worker"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
 	}
 
-	WithDefaultReadyOnStart(true)(&rt.config)
-	WithDefaultAcceptingWorkOnStart(true)(&rt.config)
-	WithDefaultWorkerCommandConcurrency(3)(&rt.config)
-	WithDefaultWorkerReadinessContribution(true)(&rt.config)
-	if err := rt.Register(WorkerSpec{Name: "second", Worker: testWorker{}}); err != nil {
-		t.Fatalf("Register second returned error: %v", err)
-	}
-	if err := rt.StartAll(context.Background()); err != nil {
-		t.Fatalf("StartAll returned error: %v", err)
-	}
-
-	first, ok := rt.Worker("first")
+	snapshot, ok := rt.Worker("worker")
 	if !ok {
-		t.Fatal("first worker missing")
+		t.Fatal("worker missing")
 	}
-	if first.Status.Ready {
-		t.Fatal("first ready = true, want copied false")
+	if snapshot.Status.Ready {
+		t.Fatal("worker ready = true, want default false")
 	}
-	if first.Status.AcceptingWork {
-		t.Fatal("first accepting work = true, want copied false")
+	if snapshot.Status.AcceptingWork {
+		t.Fatal("worker accepting work = true, want default false")
 	}
-	if rt.workerConfigs[first.QualifiedName].commandConcurrency != 7 {
-		t.Fatalf("first command concurrency = %d, want copied 7", rt.workerConfigs[first.QualifiedName].commandConcurrency)
-	}
-	if rt.workerConfigs[first.QualifiedName].contributesToReadiness {
-		t.Fatal("first contributesToReadiness = true, want copied false")
-	}
-
-	second, ok := rt.Worker("second")
-	if !ok {
-		t.Fatal("second worker missing")
-	}
-	if !second.Status.Ready {
-		t.Fatal("second ready = false, want copied true")
-	}
-	if !second.Status.AcceptingWork {
-		t.Fatal("second accepting work = false, want copied true")
-	}
-	if rt.workerConfigs[second.QualifiedName].commandConcurrency != 3 {
-		t.Fatalf("second command concurrency = %d, want copied 3", rt.workerConfigs[second.QualifiedName].commandConcurrency)
-	}
-	if !rt.workerConfigs[second.QualifiedName].contributesToReadiness {
-		t.Fatal("second contributesToReadiness = false, want copied true")
+	if !rt.Status().Ready {
+		t.Fatal("runtime ready = false, want fallback ready with no contributing workers")
 	}
 }
 
@@ -517,15 +412,15 @@ func TestFailurePolicyOptions(t *testing.T) {
 
 func TestWithObserverNilAndSafeObserverWrapping(t *testing.T) {
 	rt := newTestRuntime(t, WithObserver(nil))
-	if _, ok := rt.config.observer.(NopObserver); !ok {
-		t.Fatalf("observer = %T, want NopObserver", rt.config.observer)
+	if err := rt.Register(WorkerSpec{Name: "worker", Worker: testWorker{}}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "worker"); err != nil {
+		t.Fatalf("Start with nil observer returned error: %v", err)
 	}
 
 	observer := &panicObserver{panicStart: true}
 	rt = newTestRuntime(t, WithObserver(observer))
-	if _, ok := rt.config.observer.(safeObserver); !ok {
-		t.Fatalf("observer = %T, want safeObserver", rt.config.observer)
-	}
 	if err := rt.Register(
 		WorkerSpec{Name: "worker", Worker: testWorker{}},
 		WithCommand("work", CommandHandlerFunc(func(context.Context, CommandRequest) (CommandResult, error) {

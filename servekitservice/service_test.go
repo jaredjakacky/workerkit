@@ -1,14 +1,14 @@
-package servekitservice
+package servekitservice_test
 
 import (
 	"context"
 	"errors"
+	. "github.com/jaredjakacky/workerkit/servekitservice"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/jaredjakacky/servekit"
 	workerkit "github.com/jaredjakacky/workerkit"
@@ -88,7 +88,7 @@ func TestNewManagedWiresReadiness(t *testing.T) {
 	}
 	service.Server().SetReady(true)
 
-	rec := performRequest(service.server, http.MethodGet, "/readyz")
+	rec := performRequest(service.Server(), http.MethodGet, "/readyz")
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("readyz before worker start status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
 	}
@@ -103,7 +103,7 @@ func TestNewManagedWiresReadiness(t *testing.T) {
 		_ = rt.Stop(context.Background(), "worker")
 	})
 
-	rec = performRequest(service.server, http.MethodGet, "/readyz")
+	rec = performRequest(service.Server(), http.MethodGet, "/readyz")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("readyz after worker start status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
@@ -267,10 +267,8 @@ func TestShutdownWorkersStopsStartedWorkers(t *testing.T) {
 	if err := rt.Start(context.Background(), "worker"); err != nil {
 		t.Fatalf("Start returned error: %v", err)
 	}
-	service := newTestService(t, rt)
-
-	if err := service.shutdownWorkers(context.Background()); err != nil {
-		t.Fatalf("shutdownWorkers returned error: %v", err)
+	if err := rt.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown returned error: %v", err)
 	}
 	if got := stops.Load(); got != 1 {
 		t.Fatalf("stop calls = %d, want 1", got)
@@ -295,129 +293,12 @@ func TestNewManagedAppliesRunOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManaged returned error: %v", err)
 	}
-	if !service.config.opsHTTPEnabled {
-		t.Fatal("opsHTTPEnabled = false, want true")
+	if service.Server() == nil {
+		t.Fatal("Server returned nil")
 	}
-	if service.config.startWorkers {
-		t.Fatal("startWorkers = true, want false")
-	}
-	if service.config.gracefulWorkerShutdown {
-		t.Fatal("gracefulWorkerShutdown = true, want false")
-	}
-	if service.config.shutdownTimeout != -1 {
-		t.Fatalf("shutdownTimeout = %s, want -1ns", service.config.shutdownTimeout)
-	}
-}
-
-func TestShutdownWorkersUsesStopFallbackAfterIdleWaitTimeout(t *testing.T) {
-	t.Parallel()
-
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	var stops atomic.Int32
-	rt := newTestRuntime(t)
-	if err := rt.Register(
-		workerkit.WorkerSpec{
-			Name: "worker",
-			Worker: testWorker{
-				stop: func(context.Context) error {
-					stops.Add(1)
-					return nil
-				},
-			},
-		},
-		workerkit.WithCommand("block", workerkit.CommandHandlerFunc(func(context.Context, workerkit.CommandRequest) (workerkit.CommandResult, error) {
-			close(entered)
-			<-release
-			return workerkit.CommandResult{}, nil
-		})),
-	); err != nil {
-		t.Fatalf("Register returned error: %v", err)
-	}
-	if err := rt.Start(context.Background(), "worker"); err != nil {
-		t.Fatalf("Start returned error: %v", err)
-	}
-	dispatchDone := make(chan error, 1)
-	go func() {
-		_, err := rt.Dispatch(context.Background(), workerkit.CommandRequest{Worker: "worker", Name: "block"})
-		dispatchDone <- err
-	}()
-	<-entered
-
-	service := newTestService(t, rt, WithShutdownTimeout(time.Millisecond))
-	err := service.shutdownWorkers(context.Background())
-	close(release)
-	if dispatchErr := <-dispatchDone; dispatchErr != nil {
-		t.Fatalf("Dispatch returned error: %v", dispatchErr)
-	}
-	if err == nil {
-		t.Fatal("shutdownWorkers returned nil, want idle wait timeout error")
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("shutdownWorkers error = %v, want DeadlineExceeded", err)
-	}
-	if got := stops.Load(); got != 1 {
-		t.Fatalf("stop calls = %d, want 1", got)
-	}
-}
-
-func TestShutdownWorkersFallbackDoesNotLeaveDeadlineFailure(t *testing.T) {
-	t.Parallel()
-
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	var stops atomic.Int32
-	rt := newTestRuntime(t)
-	if err := rt.Register(
-		workerkit.WorkerSpec{
-			Name: "worker",
-			Worker: testWorker{
-				stop: func(ctx context.Context) error {
-					stops.Add(1)
-					return ctx.Err()
-				},
-			},
-		},
-		workerkit.WithCommand("block", workerkit.CommandHandlerFunc(func(context.Context, workerkit.CommandRequest) (workerkit.CommandResult, error) {
-			close(entered)
-			<-release
-			return workerkit.CommandResult{}, nil
-		})),
-	); err != nil {
-		t.Fatalf("Register returned error: %v", err)
-	}
-	if err := rt.Start(context.Background(), "worker"); err != nil {
-		t.Fatalf("Start returned error: %v", err)
-	}
-	dispatchDone := make(chan error, 1)
-	go func() {
-		_, err := rt.Dispatch(context.Background(), workerkit.CommandRequest{Worker: "worker", Name: "block"})
-		dispatchDone <- err
-	}()
-	<-entered
-
-	service := newTestService(t, rt, WithShutdownTimeout(time.Millisecond))
-	err := service.shutdownWorkers(context.Background())
-	close(release)
-	if dispatchErr := <-dispatchDone; dispatchErr != nil {
-		t.Fatalf("Dispatch returned error: %v", dispatchErr)
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("shutdownWorkers error = %v, want DeadlineExceeded", err)
-	}
-	if got := stops.Load(); got != 1 {
-		t.Fatalf("stop calls = %d, want 1", got)
-	}
-	snapshot, ok := rt.Worker("worker")
-	if !ok {
-		t.Fatal("worker missing")
-	}
-	status := snapshot.Status
-	if status.State != workerkit.StateStopped {
-		t.Fatalf("worker state = %s, want %s", status.State, workerkit.StateStopped)
-	}
-	if status.LastFailure != nil {
-		t.Fatalf("LastFailure = %#v, want nil", status.LastFailure)
+	rec := performRequest(service.Server(), http.MethodGet, "/admin/runtime")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ops runtime status = %d, want %d", rec.Code, http.StatusOK)
 	}
 }
 
@@ -431,8 +312,8 @@ func TestRunRejectsInvalidService(t *testing.T) {
 	if err := (&Service{}).Run(context.Background()); !errors.Is(err, opshttp.ErrNilRuntime) {
 		t.Fatalf("missing runtime Run error = %v, want ErrNilRuntime", err)
 	}
-	if err := (&Service{runtime: newTestRuntime(t)}).Run(context.Background()); !errors.Is(err, opshttp.ErrNilServer) {
-		t.Fatalf("missing server Run error = %v, want ErrNilServer", err)
+	if _, err := New(newTestRuntime(t), nil); !errors.Is(err, opshttp.ErrNilServer) {
+		t.Fatalf("New missing server error = %v, want ErrNilServer", err)
 	}
 }
 

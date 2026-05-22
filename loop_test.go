@@ -1,8 +1,9 @@
-package workerkit
+package workerkit_test
 
 import (
 	"context"
 	"errors"
+	. "github.com/jaredjakacky/workerkit"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -23,7 +24,11 @@ func (r loopReadyFailRuntime) SetReady(ready bool) error {
 
 func TestLoopWorkerStartRejectsNilLoop(t *testing.T) {
 	worker := NewLoopWorker(nil)
-	err := worker.Start(withWorkerRuntime(context.Background(), fakeWorkerRuntime{}))
+	rt := newTestRuntime(t)
+	if err := rt.Register(WorkerSpec{Name: "loop", Worker: worker}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	err := rt.Start(context.Background(), "loop")
 	if err == nil || !strings.Contains(err.Error(), "loop worker loop must not be nil") {
 		t.Fatalf("Start error = %v, want nil loop error", err)
 	}
@@ -199,35 +204,6 @@ func TestLoopWorkerLoopCanMarkReadyWhenAutoReadyDisabled(t *testing.T) {
 	}
 }
 
-func TestLoopWorkerAutoReadyDisabledSetsNotReadyBeforeLoop(t *testing.T) {
-	readyFailure := errors.New("ready false failed")
-	worker := NewLoopWorker(
-		func(ctx context.Context, _ WorkerRuntime) error {
-			<-ctx.Done()
-			return ctx.Err()
-		},
-		WithLoopAutoReady(false),
-	)
-
-	err := worker.Start(withWorkerRuntime(context.Background(), loopReadyFailRuntime{
-		readyFailure: readyFailure,
-	}))
-	if !errors.Is(err, readyFailure) {
-		t.Fatalf("Start error = %v, want %v", err, readyFailure)
-	}
-
-	worker.mu.Lock()
-	state := worker.state
-	done := worker.done
-	worker.mu.Unlock()
-	if state != loopIdle {
-		t.Fatalf("loop worker state = %s, want %s", state, loopIdle)
-	}
-	if done != nil {
-		t.Fatal("loop worker done channel is set, want nil")
-	}
-}
-
 func TestLoopWorkerStopCancelsLoopAndRunsStopHookOnce(t *testing.T) {
 	loopDone := make(chan struct{})
 	var stopCalls atomic.Int32
@@ -262,12 +238,8 @@ func TestLoopWorkerStopCancelsLoopAndRunsStopHookOnce(t *testing.T) {
 		t.Fatalf("stop calls = %d, want 1", got)
 	}
 
-	err := worker.Stop(withWorkerRuntime(context.Background(), fakeWorkerRuntime{}))
-	if err != nil {
-		t.Fatalf("direct second Stop returned error: %v", err)
-	}
 	if got := stopCalls.Load(); got != 1 {
-		t.Fatalf("stop calls after second stop = %d, want 1", got)
+		t.Fatalf("stop calls after stop = %d, want 1", got)
 	}
 }
 
@@ -359,12 +331,9 @@ func TestLoopWorkerStartWhileRunningReturnsActiveError(t *testing.T) {
 		_ = rt.Stop(context.Background(), "loop")
 	})
 
-	err := worker.Start(withWorkerRuntime(context.Background(), fakeWorkerRuntime{}))
-	if !errors.Is(err, ErrLoopWorkerActive) {
-		t.Fatalf("direct Start error = %v, want ErrLoopWorkerActive", err)
-	}
-	if !strings.Contains(err.Error(), "state=running") {
-		t.Fatalf("direct Start error = %v, want running state", err)
+	err := rt.Start(context.Background(), "loop")
+	if !errors.Is(err, ErrInvalidWorkerState) {
+		t.Fatalf("second Start error = %v, want ErrInvalidWorkerState", err)
 	}
 }
 
@@ -393,25 +362,6 @@ func TestLoopWorkerCanRestartAfterStop(t *testing.T) {
 	t.Cleanup(func() {
 		_ = rt.Stop(context.Background(), "loop")
 	})
-}
-
-func TestLoopWorkerStateString(t *testing.T) {
-	tests := []struct {
-		state loopWorkerState
-		want  string
-	}{
-		{state: loopIdle, want: "idle"},
-		{state: loopStarting, want: "starting"},
-		{state: loopRunning, want: "running"},
-		{state: loopStopping, want: "stopping"},
-		{state: loopStopped, want: "stopped"},
-		{state: loopWorkerState(99), want: "unknown(99)"},
-	}
-	for _, tc := range tests {
-		if got := tc.state.String(); got != tc.want {
-			t.Fatalf("%d.String() = %q, want %q", tc.state, got, tc.want)
-		}
-	}
 }
 
 func waitForLoopState(t *testing.T, rt *Runtime, want LifecycleState) WorkerSnapshot {

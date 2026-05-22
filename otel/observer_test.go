@@ -1,8 +1,9 @@
-package otel
+package otel_test
 
 import (
 	"context"
 	"errors"
+	. "github.com/jaredjakacky/workerkit/otel"
 	"strings"
 	"testing"
 	"time"
@@ -32,37 +33,36 @@ func TestNewConfiguresProvidersAttributesAndInstruments(t *testing.T) {
 		t.Fatalf("New returned error: %v", err)
 	}
 
-	if observer.config.tracerProvider != tracerProvider {
-		t.Fatal("observer did not keep configured tracer provider")
+	if observer == nil {
+		t.Fatal("New returned nil observer")
 	}
-	if observer.config.meterProvider != meterProvider {
-		t.Fatal("observer did not keep configured meter provider")
+	if tracerProvider.name != "github.com/jaredjakacky/workerkit/otel" {
+		t.Fatalf("tracer name = %q, want %q", tracerProvider.name, "github.com/jaredjakacky/workerkit/otel")
 	}
-	if tracerProvider.name != instrumentationName {
-		t.Fatalf("tracer name = %q, want %q", tracerProvider.name, instrumentationName)
-	}
-	if meterProvider.name != instrumentationName {
-		t.Fatalf("meter name = %q, want %q", meterProvider.name, instrumentationName)
+	if meterProvider.name != "github.com/jaredjakacky/workerkit/otel" {
+		t.Fatalf("meter name = %q, want %q", meterProvider.name, "github.com/jaredjakacky/workerkit/otel")
 	}
 
 	for _, name := range []string{
-		metricCommandCount,
-		metricCommandDuration,
-		metricFailureCount,
-		metricReadinessChangeCount,
-		metricLifecycleChangeCount,
+		"workerkit.command.dispatches",
+		"workerkit.command.duration",
+		"workerkit.failures",
+		"workerkit.readiness.changes",
+		"workerkit.lifecycle.transitions",
 	} {
 		if !meterProvider.meter.created(name) {
 			t.Fatalf("metric %q was not created", name)
 		}
 	}
 
-	attrs := observer.attrs("runtime-a", "", "", attribute.Bool(attrReady, true))
-	assertStringAttr(t, attrs, attrRuntime, "runtime-a")
-	assertNoAttr(t, attrs, attrWorker)
-	assertNoAttr(t, attrs, attrCommand)
-	assertStringAttr(t, attrs, "service.name", "workerkit-test")
-	assertBoolAttr(t, attrs, attrReady, true)
+	observer.ObserveReadiness(context.Background(), workerkit.ReadinessEvent{
+		Runtime: "runtime-a",
+		Ready:   true,
+	})
+	add := meterProvider.meter.counter("workerkit.readiness.changes").adds[0]
+	assertStringAttr(t, add.attrs, "workerkit.runtime", "runtime-a")
+	assertStringAttr(t, add.attrs, "service.name", "workerkit-test")
+	assertBoolAttr(t, add.attrs, "workerkit.ready", true)
 }
 
 func TestNewUsesGlobalProvidersWhenOptionsAreNil(t *testing.T) {
@@ -72,11 +72,8 @@ func TestNewUsesGlobalProvidersWhenOptionsAreNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
-	if observer.config.tracerProvider == nil {
-		t.Fatal("tracer provider is nil")
-	}
-	if observer.config.meterProvider == nil {
-		t.Fatal("meter provider is nil")
+	if observer == nil {
+		t.Fatal("New returned nil observer")
 	}
 }
 
@@ -90,27 +87,27 @@ func TestNewReturnsMetricCreationErrors(t *testing.T) {
 	}{
 		{
 			name:       "command count",
-			metricName: metricCommandCount,
+			metricName: "workerkit.command.dispatches",
 			want:       "create command count metric",
 		},
 		{
 			name:       "command duration",
-			metricName: metricCommandDuration,
+			metricName: "workerkit.command.duration",
 			want:       "create command duration metric",
 		},
 		{
 			name:       "failure count",
-			metricName: metricFailureCount,
+			metricName: "workerkit.failures",
 			want:       "create failure count metric",
 		},
 		{
 			name:       "readiness change count",
-			metricName: metricReadinessChangeCount,
+			metricName: "workerkit.readiness.changes",
 			want:       "create readiness change count metric",
 		},
 		{
 			name:       "lifecycle change count",
-			metricName: metricLifecycleChangeCount,
+			metricName: "workerkit.lifecycle.transitions",
 			want:       "create lifecycle change count metric",
 		},
 	}
@@ -174,32 +171,32 @@ func TestStartCommandRecordsSpanAndCommandMetrics(t *testing.T) {
 	if span.statusCode != codes.Ok {
 		t.Fatalf("span status = %s, want %s", span.statusCode, codes.Ok)
 	}
-	assertStringAttr(t, span.attrs, attrRuntime, "runtime-a")
-	assertStringAttr(t, span.attrs, attrWorker, "worker-a")
-	assertStringAttr(t, span.attrs, attrCommand, "sync")
-	assertStringAttr(t, span.attrs, attrDispatchID, "runtime-a-1")
+	assertStringAttr(t, span.attrs, "workerkit.runtime", "runtime-a")
+	assertStringAttr(t, span.attrs, "workerkit.worker", "worker-a")
+	assertStringAttr(t, span.attrs, "workerkit.command", "sync")
+	assertStringAttr(t, span.attrs, "workerkit.command.dispatch_id", "runtime-a-1")
 	assertStringAttr(t, span.attrs, "service.name", "workerkit-test")
-	assertBoolAttr(t, span.attrs, attrCommandSuccess, true)
-	assertIntAttr(t, span.attrs, attrCommandAttempts, 2)
+	assertBoolAttr(t, span.attrs, "workerkit.command.success", true)
+	assertIntAttr(t, span.attrs, "workerkit.command.attempts", 2)
 
-	commandCount := meterProvider.meter.counter(metricCommandCount)
+	commandCount := meterProvider.meter.counter("workerkit.command.dispatches")
 	if got := commandCount.total(); got != 1 {
 		t.Fatalf("command count = %d, want 1", got)
 	}
-	assertBoolAttr(t, commandCount.adds[0].attrs, attrCommandSuccess, true)
-	assertNoAttr(t, commandCount.adds[0].attrs, attrDispatchID)
-	assertNoAttr(t, commandCount.adds[0].attrs, attrCommandAttempts)
+	assertBoolAttr(t, commandCount.adds[0].attrs, "workerkit.command.success", true)
+	assertNoAttr(t, commandCount.adds[0].attrs, "workerkit.command.dispatch_id")
+	assertNoAttr(t, commandCount.adds[0].attrs, "workerkit.command.attempts")
 
-	commandDuration := meterProvider.meter.histogram(metricCommandDuration)
+	commandDuration := meterProvider.meter.histogram("workerkit.command.duration")
 	if len(commandDuration.records) != 1 {
 		t.Fatalf("duration record count = %d, want 1", len(commandDuration.records))
 	}
 	if commandDuration.records[0].value != 0.125 {
 		t.Fatalf("duration = %v, want 0.125", commandDuration.records[0].value)
 	}
-	assertBoolAttr(t, commandDuration.records[0].attrs, attrCommandSuccess, true)
-	assertNoAttr(t, commandDuration.records[0].attrs, attrDispatchID)
-	assertNoAttr(t, commandDuration.records[0].attrs, attrCommandAttempts)
+	assertBoolAttr(t, commandDuration.records[0].attrs, "workerkit.command.success", true)
+	assertNoAttr(t, commandDuration.records[0].attrs, "workerkit.command.dispatch_id")
+	assertNoAttr(t, commandDuration.records[0].attrs, "workerkit.command.attempts")
 }
 
 func TestCommandEndRecordsFailureSpanAndMetrics(t *testing.T) {
@@ -234,13 +231,13 @@ func TestCommandEndRecordsFailureSpanAndMetrics(t *testing.T) {
 	if len(span.errors) != 1 || !errors.Is(span.errors[0].err, commandErr) {
 		t.Fatalf("recorded errors = %#v, want command error", span.errors)
 	}
-	assertBoolAttr(t, span.attrs, attrCommandSuccess, false)
+	assertBoolAttr(t, span.attrs, "workerkit.command.success", false)
 
-	commandCount := meterProvider.meter.counter(metricCommandCount)
+	commandCount := meterProvider.meter.counter("workerkit.command.dispatches")
 	if got := commandCount.total(); got != 1 {
 		t.Fatalf("command count = %d, want 1", got)
 	}
-	assertBoolAttr(t, commandCount.adds[0].attrs, attrCommandSuccess, false)
+	assertBoolAttr(t, commandCount.adds[0].attrs, "workerkit.command.success", false)
 }
 
 func TestCommandEndRecordsMessageWhenErrorIsNil(t *testing.T) {
@@ -281,22 +278,22 @@ func TestObserveTransitionRecordsEventAndMetric(t *testing.T) {
 	})
 
 	event := parent.onlyEvent(t)
-	if event.name != eventLifecycleChange {
-		t.Fatalf("event name = %q, want %q", event.name, eventLifecycleChange)
+	if event.name != "workerkit.lifecycle.change" {
+		t.Fatalf("event name = %q, want %q", event.name, "workerkit.lifecycle.change")
 	}
 	if !event.at.Equal(at) {
 		t.Fatalf("event time = %s, want %s", event.at, at)
 	}
-	assertStringAttr(t, event.attrs, attrRuntime, "runtime-a")
-	assertStringAttr(t, event.attrs, attrWorker, "worker-a")
-	assertStringAttr(t, event.attrs, attrLifecycleFrom, string(workerkit.StateStarting))
-	assertStringAttr(t, event.attrs, attrLifecycleTo, string(workerkit.StateRunning))
+	assertStringAttr(t, event.attrs, "workerkit.runtime", "runtime-a")
+	assertStringAttr(t, event.attrs, "workerkit.worker", "worker-a")
+	assertStringAttr(t, event.attrs, "workerkit.lifecycle.from", string(workerkit.StateStarting))
+	assertStringAttr(t, event.attrs, "workerkit.lifecycle.to", string(workerkit.StateRunning))
 
-	counter := meterProvider.meter.counter(metricLifecycleChangeCount)
+	counter := meterProvider.meter.counter("workerkit.lifecycle.transitions")
 	if got := counter.total(); got != 1 {
 		t.Fatalf("lifecycle metric count = %d, want 1", got)
 	}
-	assertStringAttr(t, counter.adds[0].attrs, attrLifecycleTo, string(workerkit.StateRunning))
+	assertStringAttr(t, counter.adds[0].attrs, "workerkit.lifecycle.to", string(workerkit.StateRunning))
 }
 
 func TestObserveFailureRecordsEventStatusErrorAndMetric(t *testing.T) {
@@ -320,15 +317,15 @@ func TestObserveFailureRecordsEventStatusErrorAndMetric(t *testing.T) {
 	})
 
 	event := parent.onlyEvent(t)
-	if event.name != eventFailure {
-		t.Fatalf("event name = %q, want %q", event.name, eventFailure)
+	if event.name != "workerkit.failure" {
+		t.Fatalf("event name = %q, want %q", event.name, "workerkit.failure")
 	}
-	assertStringAttr(t, event.attrs, attrRuntime, "runtime-a")
-	assertStringAttr(t, event.attrs, attrWorker, "worker-a")
-	assertStringAttr(t, event.attrs, attrCommand, "sync")
-	assertStringAttr(t, event.attrs, attrDispatchID, "runtime-a-1")
-	assertIntAttr(t, event.attrs, attrCommandAttempt, 2)
-	assertBoolAttr(t, event.attrs, attrFailurePanic, true)
+	assertStringAttr(t, event.attrs, "workerkit.runtime", "runtime-a")
+	assertStringAttr(t, event.attrs, "workerkit.worker", "worker-a")
+	assertStringAttr(t, event.attrs, "workerkit.command", "sync")
+	assertStringAttr(t, event.attrs, "workerkit.command.dispatch_id", "runtime-a-1")
+	assertIntAttr(t, event.attrs, "workerkit.command.attempt", 2)
+	assertBoolAttr(t, event.attrs, "workerkit.failure.panic", true)
 
 	if parent.statusCode != codes.Error {
 		t.Fatalf("span status = %s, want %s", parent.statusCode, codes.Error)
@@ -340,13 +337,13 @@ func TestObserveFailureRecordsEventStatusErrorAndMetric(t *testing.T) {
 		t.Fatalf("recorded errors = %#v, want failure error", parent.errors)
 	}
 
-	counter := meterProvider.meter.counter(metricFailureCount)
+	counter := meterProvider.meter.counter("workerkit.failures")
 	if got := counter.total(); got != 1 {
 		t.Fatalf("failure metric count = %d, want 1", got)
 	}
-	assertBoolAttr(t, counter.adds[0].attrs, attrFailurePanic, true)
-	assertNoAttr(t, counter.adds[0].attrs, attrDispatchID)
-	assertNoAttr(t, counter.adds[0].attrs, attrCommandAttempt)
+	assertBoolAttr(t, counter.adds[0].attrs, "workerkit.failure.panic", true)
+	assertNoAttr(t, counter.adds[0].attrs, "workerkit.command.dispatch_id")
+	assertNoAttr(t, counter.adds[0].attrs, "workerkit.command.attempt")
 }
 
 func TestObserveFailureRecordsMessageWhenErrorIsNil(t *testing.T) {
@@ -381,28 +378,29 @@ func TestObserveReadinessRecordsEventAndMetric(t *testing.T) {
 	})
 
 	event := parent.onlyEvent(t)
-	if event.name != eventReadinessChange {
-		t.Fatalf("event name = %q, want %q", event.name, eventReadinessChange)
+	if event.name != "workerkit.readiness.change" {
+		t.Fatalf("event name = %q, want %q", event.name, "workerkit.readiness.change")
 	}
 	if !event.at.Equal(at) {
 		t.Fatalf("event time = %s, want %s", event.at, at)
 	}
-	assertStringAttr(t, event.attrs, attrRuntime, "runtime-a")
-	assertStringAttr(t, event.attrs, attrWorker, "worker-a")
-	assertBoolAttr(t, event.attrs, attrReady, true)
+	assertStringAttr(t, event.attrs, "workerkit.runtime", "runtime-a")
+	assertStringAttr(t, event.attrs, "workerkit.worker", "worker-a")
+	assertBoolAttr(t, event.attrs, "workerkit.ready", true)
 
-	counter := meterProvider.meter.counter(metricReadinessChangeCount)
+	counter := meterProvider.meter.counter("workerkit.readiness.changes")
 	if got := counter.total(); got != 1 {
 		t.Fatalf("readiness metric count = %d, want 1", got)
 	}
-	assertBoolAttr(t, counter.adds[0].attrs, attrReady, true)
+	assertBoolAttr(t, counter.adds[0].attrs, "workerkit.ready", true)
 }
 
 func TestNilInstrumentsDoNotPanic(t *testing.T) {
 	t.Parallel()
 
-	observer := &Observer{
-		tracer: tracenoop.NewTracerProvider().Tracer(instrumentationName),
+	observer, err := New(WithTracerProvider(tracenoop.NewTracerProvider()), WithMeterProvider(metricnoop.NewMeterProvider()))
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
 	}
 
 	observer.ObserveTransition(context.Background(), workerkit.TransitionEvent{Runtime: "runtime-a"})
