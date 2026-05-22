@@ -10,18 +10,6 @@ import (
 	"time"
 )
 
-type loopReadyFailRuntime struct {
-	fakeWorkerRuntime
-	readyFailure error
-}
-
-func (r loopReadyFailRuntime) SetReady(ready bool) error {
-	if !ready {
-		return r.readyFailure
-	}
-	return nil
-}
-
 func TestLoopWorkerStartRejectsNilLoop(t *testing.T) {
 	worker := NewLoopWorker(nil)
 	rt := newTestRuntime(t)
@@ -238,8 +226,12 @@ func TestLoopWorkerStopCancelsLoopAndRunsStopHookOnce(t *testing.T) {
 		t.Fatalf("stop calls = %d, want 1", got)
 	}
 
+	err := rt.Stop(context.Background(), "loop")
+	if !errors.Is(err, ErrInvalidWorkerState) {
+		t.Fatalf("second Stop error = %v, want ErrInvalidWorkerState", err)
+	}
 	if got := stopCalls.Load(); got != 1 {
-		t.Fatalf("stop calls after stop = %d, want 1", got)
+		t.Fatalf("stop calls after second stop = %d, want 1", got)
 	}
 }
 

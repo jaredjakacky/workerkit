@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jaredjakacky/servekit"
 	workerkit "github.com/jaredjakacky/workerkit"
@@ -278,7 +279,7 @@ func TestShutdownWorkersStopsStartedWorkers(t *testing.T) {
 	}
 }
 
-func TestNewManagedAppliesRunOptions(t *testing.T) {
+func TestNewManagedCanMountOpsHTTP(t *testing.T) {
 	t.Parallel()
 
 	rt := newTestRuntime(t)
@@ -299,6 +300,121 @@ func TestNewManagedAppliesRunOptions(t *testing.T) {
 	rec := performRequest(service.Server(), http.MethodGet, "/admin/runtime")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("ops runtime status = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+func TestRunCanSkipWorkerStartup(t *testing.T) {
+	t.Parallel()
+
+	var starts atomic.Int32
+	rt := newTestRuntime(t)
+	if err := rt.Register(workerkit.WorkerSpec{
+		Name: "worker",
+		Worker: testWorker{
+			start: func(context.Context) error {
+				starts.Add(1)
+				return nil
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	service := newTestService(t, rt, WithStartWorkers(false))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_ = service.Run(ctx)
+
+	if got := starts.Load(); got != 0 {
+		t.Fatalf("start calls = %d, want 0", got)
+	}
+	if state := requireWorkerState(t, rt, "worker"); state != workerkit.StateRegistered {
+		t.Fatalf("worker state = %s, want registered", state)
+	}
+}
+
+func TestRunCanSkipGracefulShutdownAfterServekitReturns(t *testing.T) {
+	t.Parallel()
+
+	var stops atomic.Int32
+	rt := newTestRuntime(t)
+	if err := rt.Register(workerkit.WorkerSpec{
+		Name: "worker",
+		Worker: testWorker{
+			stop: func(context.Context) error {
+				stops.Add(1)
+				return nil
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "worker"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = rt.Stop(context.Background(), "worker")
+	})
+	service := newTestService(t, rt, WithStartWorkers(false), WithGracefulWorkerShutdown(false))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_ = service.Run(ctx)
+
+	if got := stops.Load(); got != 0 {
+		t.Fatalf("stop calls = %d, want 0", got)
+	}
+	if state := requireWorkerState(t, rt, "worker"); state != workerkit.StateRunning {
+		t.Fatalf("worker state = %s, want running", state)
+	}
+}
+
+func TestRunAppliesShutdownTimeout(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var stops atomic.Int32
+	rt := newTestRuntime(t)
+	if err := rt.Register(
+		workerkit.WorkerSpec{
+			Name: "worker",
+			Worker: testWorker{
+				stop: func(context.Context) error {
+					stops.Add(1)
+					return nil
+				},
+			},
+		},
+		workerkit.WithCommand("block", workerkit.CommandHandlerFunc(func(context.Context, workerkit.CommandRequest) (workerkit.CommandResult, error) {
+			close(entered)
+			<-release
+			return workerkit.CommandResult{}, nil
+		})),
+	); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "worker"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	dispatchDone := make(chan error, 1)
+	go func() {
+		_, err := rt.Dispatch(context.Background(), workerkit.CommandRequest{Worker: "worker", Name: "block"})
+		dispatchDone <- err
+	}()
+	<-entered
+
+	service := newTestService(t, rt, WithStartWorkers(false), WithShutdownTimeout(time.Millisecond))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := service.Run(ctx)
+	close(release)
+	if dispatchErr := <-dispatchDone; dispatchErr != nil {
+		t.Fatalf("Dispatch returned error: %v", dispatchErr)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run error = %v, want DeadlineExceeded", err)
+	}
+	if got := stops.Load(); got != 1 {
+		t.Fatalf("stop calls = %d, want 1", got)
 	}
 }
 

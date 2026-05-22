@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	. "github.com/jaredjakacky/workerkit/opshttp"
 	"net/http"
 	"net/http/httptest"
@@ -97,32 +98,175 @@ func TestDispatchRejectsInvalidCommandRequest(t *testing.T) {
 	assertErrorBody(t, rec, "invalid command name")
 }
 
+func TestDispatchMapsAdmissionErrors(t *testing.T) {
+	t.Run("missing worker", func(t *testing.T) {
+		server := newDispatchServer(t, workerkit.CommandHandlerFunc(func(context.Context, workerkit.CommandRequest) (workerkit.CommandResult, error) {
+			return workerkit.CommandResult{}, nil
+		}))
+
+		rec := postDispatch(t, server, `{"worker":"missing","name":"echo"}`)
+		assertStatus(t, rec, http.StatusNotFound)
+		assertErrorBody(t, rec, `worker "missing" not found`)
+	})
+
+	t.Run("missing command", func(t *testing.T) {
+		server := newDispatchServer(t, workerkit.CommandHandlerFunc(func(context.Context, workerkit.CommandRequest) (workerkit.CommandResult, error) {
+			return workerkit.CommandResult{}, nil
+		}))
+
+		rec := postDispatch(t, server, `{"worker":"worker","name":"missing"}`)
+		assertStatus(t, rec, http.StatusNotFound)
+		assertErrorBody(t, rec, `command "missing" not found`)
+	})
+
+	t.Run("runtime not accepting work", func(t *testing.T) {
+		server := newDispatchServerWithOptions(t, nil, nil, false, workerkit.CommandHandlerFunc(func(context.Context, workerkit.CommandRequest) (workerkit.CommandResult, error) {
+			return workerkit.CommandResult{}, nil
+		}))
+
+		rec := postDispatch(t, server, `{"worker":"worker","name":"echo"}`)
+		assertStatus(t, rec, http.StatusServiceUnavailable)
+		assertErrorBody(t, rec, workerkit.ErrRuntimeNotAcceptingWork.Error())
+	})
+
+	t.Run("worker not accepting work", func(t *testing.T) {
+		server := newDispatchServerWithOptions(t, nil, []workerkit.WorkerOption{
+			workerkit.WithWorkerAcceptingWorkOnStart(false),
+		}, true, workerkit.CommandHandlerFunc(func(context.Context, workerkit.CommandRequest) (workerkit.CommandResult, error) {
+			return workerkit.CommandResult{}, nil
+		}))
+
+		rec := postDispatch(t, server, `{"worker":"worker","name":"echo"}`)
+		assertStatus(t, rec, http.StatusConflict)
+		assertErrorBody(t, rec, workerkit.ErrWorkerNotAcceptingWork.Error())
+	})
+
+	t.Run("invalid worker state", func(t *testing.T) {
+		rt, server := newDispatchRuntimeServer(t, nil, nil, true, workerkit.CommandHandlerFunc(func(context.Context, workerkit.CommandRequest) (workerkit.CommandResult, error) {
+			return workerkit.CommandResult{}, nil
+		}))
+		if err := rt.Drain(context.Background(), "worker"); err != nil {
+			t.Fatalf("Drain returned error: %v", err)
+		}
+
+		rec := postDispatch(t, server, `{"worker":"worker","name":"echo"}`)
+		assertStatus(t, rec, http.StatusConflict)
+		assertErrorBody(t, rec, workerkit.ErrInvalidWorkerState.Error())
+	})
+
+	t.Run("runtime saturated", func(t *testing.T) {
+		server, release, done := newSaturatedDispatchServer(t, []workerkit.RuntimeOption{
+			workerkit.WithRuntimeCommandConcurrency(1),
+		}, nil)
+
+		rec := postDispatch(t, server, `{"worker":"worker","name":"echo"}`)
+		assertStatus(t, rec, http.StatusTooManyRequests)
+		assertErrorBody(t, rec, workerkit.ErrRuntimeSaturated.Error())
+		close(release)
+		if err := <-done; err != nil {
+			t.Fatalf("blocking dispatch returned error: %v", err)
+		}
+	})
+
+	t.Run("worker saturated", func(t *testing.T) {
+		server, release, done := newSaturatedDispatchServer(t, nil, []workerkit.WorkerOption{
+			workerkit.WithWorkerCommandConcurrency(1),
+		})
+
+		rec := postDispatch(t, server, `{"worker":"worker","name":"echo"}`)
+		assertStatus(t, rec, http.StatusTooManyRequests)
+		assertErrorBody(t, rec, workerkit.ErrWorkerSaturated.Error())
+		close(release)
+		if err := <-done; err != nil {
+			t.Fatalf("blocking dispatch returned error: %v", err)
+		}
+	})
+}
+
 func newDispatchServer(t *testing.T, handler workerkit.CommandHandler) *servekit.Server {
 	t.Helper()
 
-	rt, err := workerkit.New(workerkit.Identity{Name: "ops"})
+	return newDispatchServerWithOptions(t, nil, nil, true, handler)
+}
+
+func newDispatchServerWithOptions(
+	t *testing.T,
+	runtimeOpts []workerkit.RuntimeOption,
+	workerOpts []workerkit.WorkerOption,
+	start bool,
+	handler workerkit.CommandHandler,
+) *servekit.Server {
+	t.Helper()
+
+	_, server := newDispatchRuntimeServer(t, runtimeOpts, workerOpts, start, handler)
+	return server
+}
+
+func newDispatchRuntimeServer(
+	t *testing.T,
+	runtimeOpts []workerkit.RuntimeOption,
+	workerOpts []workerkit.WorkerOption,
+	start bool,
+	handler workerkit.CommandHandler,
+) (*workerkit.Runtime, *servekit.Server) {
+	t.Helper()
+
+	rt, err := workerkit.New(workerkit.Identity{Name: "ops"}, runtimeOpts...)
 	if err != nil {
-		t.Fatalf("New returned error: %v", err)
+		t.Fatalf("New with options returned error: %v", err)
 	}
+	workerOpts = append([]workerkit.WorkerOption{
+		workerkit.WithCommand("echo", handler),
+	}, workerOpts...)
 	err = rt.Register(
 		workerkit.WorkerSpec{Name: "worker", Worker: testWorker{}},
-		workerkit.WithCommand("echo", handler),
+		workerOpts...,
 	)
 	if err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
-	if err := rt.Start(context.Background(), "worker"); err != nil {
-		t.Fatalf("Start returned error: %v", err)
+	if start {
+		if err := rt.Start(context.Background(), "worker"); err != nil {
+			t.Fatalf("Start returned error: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = rt.Stop(context.Background(), "worker")
+		})
 	}
-	t.Cleanup(func() {
-		_ = rt.Stop(context.Background(), "worker")
-	})
 
 	server := servekit.New()
 	if err := Mount(server, rt, WithCommandDispatchEnabled()); err != nil {
 		t.Fatalf("Mount returned error: %v", err)
 	}
-	return server
+	return rt, server
+}
+
+func newSaturatedDispatchServer(
+	t *testing.T,
+	runtimeOpts []workerkit.RuntimeOption,
+	workerOpts []workerkit.WorkerOption,
+) (*servekit.Server, chan struct{}, chan error) {
+	t.Helper()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	handler := workerkit.CommandHandlerFunc(func(context.Context, workerkit.CommandRequest) (workerkit.CommandResult, error) {
+		close(entered)
+		<-release
+		return workerkit.CommandResult{}, nil
+	})
+	server := newDispatchServerWithOptions(t, runtimeOpts, workerOpts, true, handler)
+	done := make(chan error, 1)
+	go func() {
+		rec := postDispatch(t, server, `{"worker":"worker","name":"echo"}`)
+		if rec.Code != http.StatusOK {
+			done <- errors.New(rec.Body.String())
+			return
+		}
+		done <- nil
+	}()
+	<-entered
+	return server, release, done
 }
 
 func postDispatch(t *testing.T, server *servekit.Server, body string) *httptest.ResponseRecorder {

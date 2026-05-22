@@ -7,18 +7,6 @@ import (
 	"testing"
 )
 
-type fakeWorkerRuntime struct{}
-
-func (fakeWorkerRuntime) Name() string { return "test-runtime/worker" }
-
-func (fakeWorkerRuntime) Status() WorkerStatus { return WorkerStatus{} }
-
-func (fakeWorkerRuntime) SetReady(bool) error { return nil }
-
-func (fakeWorkerRuntime) SetAcceptingWork(bool) error { return nil }
-
-func (fakeWorkerRuntime) ReportFailure(error) error { return nil }
-
 func TestWorkerRuntimeFromContext(t *testing.T) {
 	var nilCtx context.Context
 	if got, ok := WorkerRuntimeFromContext(nilCtx); ok || got != nil {
@@ -124,6 +112,56 @@ func TestWorkerRuntimeControlsWorkerState(t *testing.T) {
 	}
 	if !snapshot.Status.AcceptingWork {
 		t.Fatal("worker accepting work = false, want true after SetAcceptingWork")
+	}
+}
+
+func TestWorkerRuntimeSignalsWhileDraining(t *testing.T) {
+	var workerRuntime WorkerRuntime
+	rt := newTestRuntime(t)
+	if err := rt.Register(WorkerSpec{
+		Name: "worker",
+		Worker: testWorker{
+			start: func(ctx context.Context) error {
+				var ok bool
+				workerRuntime, ok = WorkerRuntimeFromContext(ctx)
+				if !ok {
+					t.Fatal("missing WorkerRuntime")
+				}
+				return nil
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "worker"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	if err := rt.Drain(context.Background(), "worker"); err != nil {
+		t.Fatalf("Drain returned error: %v", err)
+	}
+
+	if err := workerRuntime.SetReady(false); err != nil {
+		t.Fatalf("SetReady(false) while draining returned error: %v", err)
+	}
+	if err := workerRuntime.SetAcceptingWork(false); err != nil {
+		t.Fatalf("SetAcceptingWork(false) while draining returned error: %v", err)
+	}
+	if err := workerRuntime.SetReady(true); !errors.Is(err, ErrInvalidWorkerState) {
+		t.Fatalf("SetReady(true) while draining error = %v, want ErrInvalidWorkerState", err)
+	}
+	if err := workerRuntime.SetAcceptingWork(true); !errors.Is(err, ErrInvalidWorkerState) {
+		t.Fatalf("SetAcceptingWork(true) while draining error = %v, want ErrInvalidWorkerState", err)
+	}
+
+	snapshot, ok := rt.Worker("worker")
+	if !ok {
+		t.Fatal("Worker missing worker")
+	}
+	if snapshot.Status.Ready {
+		t.Fatal("worker ready = true, want false")
+	}
+	if snapshot.Status.AcceptingWork {
+		t.Fatal("worker accepting work = true, want false")
 	}
 }
 

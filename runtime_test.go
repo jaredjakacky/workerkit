@@ -440,6 +440,24 @@ func TestCommandsReturnsSortedDiscoveryForLocalAndQualifiedWorkerNames(t *testin
 	}
 }
 
+func TestCommandsReturnsEmptySliceForWorkerWithoutCommands(t *testing.T) {
+	rt := newTestRuntime(t)
+	if err := rt.Register(WorkerSpec{Name: "worker", Worker: testWorker{}}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	commands, ok := rt.Commands("worker")
+	if !ok {
+		t.Fatal("Commands ok = false, want true")
+	}
+	if commands == nil {
+		t.Fatal("Commands returned nil, want empty slice")
+	}
+	if len(commands) != 0 {
+		t.Fatalf("commands length = %d, want 0", len(commands))
+	}
+}
+
 func TestStartAllStartsInRegistrationOrderAndDoesNotRollback(t *testing.T) {
 	startFailure := errors.New("second failed")
 	var calls []string
@@ -918,6 +936,49 @@ func TestDispatchAdmissionErrors(t *testing.T) {
 	_, err = rt.Dispatch(context.Background(), CommandRequest{Worker: "worker", Name: "work"})
 	if !errors.Is(err, ErrRuntimeNotAcceptingWork) {
 		t.Fatalf("stopped runtime Dispatch error = %v, want ErrRuntimeNotAcceptingWork", err)
+	}
+}
+
+func TestDispatchSetsRequestedAtWhenZeroAndPreservesProvidedValue(t *testing.T) {
+	var captured []time.Time
+	rt := newTestRuntime(t)
+	if err := rt.Register(
+		WorkerSpec{Name: "worker", Worker: testWorker{}},
+		WithCommand("work", CommandHandlerFunc(func(_ context.Context, req CommandRequest) (CommandResult, error) {
+			captured = append(captured, req.RequestedAt)
+			return CommandResult{}, nil
+		})),
+	); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "worker"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	before := time.Now()
+	if _, err := rt.Dispatch(context.Background(), CommandRequest{Worker: "worker", Name: "work"}); err != nil {
+		t.Fatalf("Dispatch zero RequestedAt returned error: %v", err)
+	}
+	after := time.Now()
+	if len(captured) != 1 {
+		t.Fatalf("captured requests = %d, want 1", len(captured))
+	}
+	if captured[0].IsZero() {
+		t.Fatal("RequestedAt was zero, want runtime-filled timestamp")
+	}
+	if captured[0].Before(before) || captured[0].After(after) {
+		t.Fatalf("RequestedAt = %s, want between %s and %s", captured[0], before, after)
+	}
+
+	provided := time.Unix(123, 456).UTC()
+	if _, err := rt.Dispatch(context.Background(), CommandRequest{Worker: "worker", Name: "work", RequestedAt: provided}); err != nil {
+		t.Fatalf("Dispatch provided RequestedAt returned error: %v", err)
+	}
+	if len(captured) != 2 {
+		t.Fatalf("captured requests = %d, want 2", len(captured))
+	}
+	if !captured[1].Equal(provided) {
+		t.Fatalf("RequestedAt = %s, want preserved %s", captured[1], provided)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/jaredjakacky/servekit"
 	workerkit "github.com/jaredjakacky/workerkit"
@@ -113,6 +114,23 @@ func TestWorkerLifecycleRouteValidationAndErrorMapping(t *testing.T) {
 	assertErrorBody(t, rec, workerkit.ErrInvalidWorkerState.Error())
 }
 
+func TestLifecycleRouteAppliesOperationTimeout(t *testing.T) {
+	rt := newLifecycleRuntime(t, "ops", map[string]workerkit.Worker{
+		"worker": lifecycleWorkerFunc(func(ctx context.Context) error {
+			<-ctx.Done()
+			return ctx.Err()
+		}),
+	})
+	server := servekit.New()
+	if err := Mount(server, rt, WithAdminLifecycleControlsEnabled(), WithLifecycleTimeout(time.Millisecond)); err != nil {
+		t.Fatalf("Mount returned error: %v", err)
+	}
+
+	rec := postLifecycle(t, server, "/admin/workers/start", `{"name":"worker"}`)
+	assertStatus(t, rec, http.StatusGatewayTimeout)
+	assertErrorBody(t, rec, "request timed out")
+}
+
 type lifecycleWorker struct {
 	starts int
 	stops  int
@@ -125,6 +143,16 @@ func (w *lifecycleWorker) Start(context.Context) error {
 
 func (w *lifecycleWorker) Stop(context.Context) error {
 	w.stops++
+	return nil
+}
+
+type lifecycleWorkerFunc func(context.Context) error
+
+func (f lifecycleWorkerFunc) Start(ctx context.Context) error {
+	return f(ctx)
+}
+
+func (f lifecycleWorkerFunc) Stop(context.Context) error {
 	return nil
 }
 
