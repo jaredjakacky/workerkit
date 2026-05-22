@@ -1,9 +1,9 @@
-package retry
+package retry_test
 
 import (
+	. "github.com/jaredjakacky/workerkit/retry"
 	"math"
 	"math/rand"
-	"sync"
 	"testing"
 	"time"
 )
@@ -50,7 +50,7 @@ func TestFullWithRand(t *testing.T) {
 
 	base := time.Second
 	source := rand.New(rand.NewSource(7))
-	want := durationFromFloat(rand.New(rand.NewSource(7)).Float64() * float64(base))
+	want := time.Duration(rand.New(rand.NewSource(7)).Float64() * float64(base))
 	got := FullWithRand(source).Apply(base, 3)
 	if got != want {
 		t.Fatalf("Apply = %s, want deterministic %s", got, want)
@@ -87,7 +87,7 @@ func TestSymmetricWithRand(t *testing.T) {
 	base := time.Second
 	fraction := 0.25
 	randomValue := rand.New(rand.NewSource(11)).Float64()
-	want := durationFromFloat(float64(base) * ((1 - fraction) + randomValue*((1+fraction)-(1-fraction))))
+	want := time.Duration(float64(base) * ((1 - fraction) + randomValue*((1+fraction)-(1-fraction))))
 	got := SymmetricWithRand(fraction, rand.New(rand.NewSource(11))).Apply(base, 2)
 	if got != want {
 		t.Fatalf("Apply = %s, want deterministic %s", got, want)
@@ -142,69 +142,5 @@ func TestSymmetricUsesPrivateRand(t *testing.T) {
 	got := Symmetric(0.25).Apply(time.Second, 1)
 	if got < 750*time.Millisecond || got > 1250*time.Millisecond {
 		t.Fatalf("Apply = %s, want within symmetric bounds", got)
-	}
-}
-
-func TestLockedRandSerializesAccess(t *testing.T) {
-	random := newLockedRand(rand.New(rand.NewSource(5)))
-	var wg sync.WaitGroup
-	values := make(chan float64, 32)
-
-	for i := 0; i < cap(values); i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			values <- random.Float64()
-		}()
-	}
-	wg.Wait()
-	close(values)
-
-	for value := range values {
-		if value < 0 || value >= 1 {
-			t.Fatalf("Float64 = %f, want [0,1)", value)
-		}
-	}
-}
-
-func TestNewLockedRandNilUsesPrivateSource(t *testing.T) {
-	t.Parallel()
-
-	random := newLockedRand(nil)
-	if random == nil || random.r == nil {
-		t.Fatalf("newLockedRand(nil) = %#v, want initialized source", random)
-	}
-	value := random.Float64()
-	if value < 0 || value >= 1 {
-		t.Fatalf("Float64 = %f, want [0,1)", value)
-	}
-}
-
-func TestDurationFromFloat(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name  string
-		delay float64
-		want  time.Duration
-	}{
-		{name: "positive", delay: float64(10 * time.Millisecond), want: 10 * time.Millisecond},
-		{name: "zero", delay: 0, want: 0},
-		{name: "negative", delay: -1, want: 0},
-		{name: "nan", delay: math.NaN(), want: 0},
-		{name: "positive infinity", delay: math.Inf(1), want: maxDuration},
-		{name: "negative infinity", delay: math.Inf(-1), want: 0},
-		{name: "max", delay: float64(maxDuration), want: maxDuration},
-	}
-
-	for _, tc := range tests {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			if got := durationFromFloat(tc.delay); got != tc.want {
-				t.Fatalf("durationFromFloat() = %s, want %s", got, tc.want)
-			}
-		})
 	}
 }

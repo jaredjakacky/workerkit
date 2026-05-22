@@ -1,13 +1,13 @@
-package opshttp
+package opshttp_test
 
 import (
 	"context"
 	"errors"
+	. "github.com/jaredjakacky/workerkit/opshttp"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jaredjakacky/servekit"
 	workerkit "github.com/jaredjakacky/workerkit"
@@ -147,105 +147,6 @@ func TestReadinessCheck(t *testing.T) {
 	}
 	if err := check(context.Background()); err != nil {
 		t.Fatalf("readiness check returned error after start: %v", err)
-	}
-}
-
-func TestNormalizePrefix(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name   string
-		prefix string
-		want   string
-	}{
-		{name: "empty", prefix: "", want: "/"},
-		{name: "spaces", prefix: "   ", want: "/"},
-		{name: "root", prefix: "/", want: "/"},
-		{name: "adds leading slash", prefix: "admin", want: "/admin"},
-		{name: "trims trailing slash", prefix: "/admin/", want: "/admin"},
-		{name: "trims spaces and slash", prefix: " admin/ ", want: "/admin"},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			if got := normalizePrefix(tt.prefix); got != tt.want {
-				t.Fatalf("normalizePrefix(%q) = %q, want %q", tt.prefix, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestRoutePath(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name   string
-		prefix string
-		suffix string
-		want   string
-	}{
-		{name: "root empty suffix", prefix: "/", suffix: "", want: "/"},
-		{name: "root suffix", prefix: "/", suffix: "runtime", want: "/runtime"},
-		{name: "root slash suffix", prefix: "/", suffix: "/runtime", want: "/runtime"},
-		{name: "prefix empty suffix", prefix: "/admin", suffix: "", want: "/admin"},
-		{name: "prefix suffix", prefix: "/admin", suffix: "runtime", want: "/admin/runtime"},
-		{name: "prefix slash suffix", prefix: "/admin", suffix: "/runtime", want: "/admin/runtime"},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			if got := routePath(tt.prefix, tt.suffix); got != tt.want {
-				t.Fatalf("routePath(%q, %q) = %q, want %q", tt.prefix, tt.suffix, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestOptionConfiguration(t *testing.T) {
-	t.Parallel()
-
-	cfg := defaultConfig()
-	WithPrefix("ops")(&cfg)
-	WithEndpointOptions(servekit.WithEndpointTimeout(time.Second))(&cfg)
-	WithDispatchOptions(servekit.WithBodyLimit(1024))(&cfg)
-	WithLifecycleOptions(servekit.WithEndpointTimeout(2 * time.Second))(&cfg)
-	WithLifecycleTimeout(5 * time.Second)(&cfg)
-	WithLifecycleTimeout(0)(&cfg)
-	WithCommandDispatchEnabled()(&cfg)
-	WithAdminLifecycleControlsEnabled()(&cfg)
-
-	if cfg.prefix != "/ops" {
-		t.Fatalf("prefix = %q, want /ops", cfg.prefix)
-	}
-	if cfg.lifecycleTimeout != 5*time.Second {
-		t.Fatalf("lifecycleTimeout = %s, want 5s", cfg.lifecycleTimeout)
-	}
-	if !cfg.commandDispatchEnabled {
-		t.Fatal("commandDispatchEnabled = false, want true")
-	}
-	if !cfg.adminLifecycleControls {
-		t.Fatal("adminLifecycleControls = false, want true")
-	}
-	if len(cfg.endpointOptions) != 1 {
-		t.Fatalf("endpointOptions len = %d, want 1", len(cfg.endpointOptions))
-	}
-	if len(cfg.dispatchOptions) != 1 {
-		t.Fatalf("dispatchOptions len = %d, want 1", len(cfg.dispatchOptions))
-	}
-	if len(cfg.lifecycleOptions) != 1 {
-		t.Fatalf("lifecycleOptions len = %d, want 1", len(cfg.lifecycleOptions))
-	}
-	if len(dispatchEndpointOptions(cfg)) != 2 {
-		t.Fatalf("dispatchEndpointOptions len = %d, want 2", len(dispatchEndpointOptions(cfg)))
-	}
-	if len(lifecycleEndpointOptions(cfg)) != 2 {
-		t.Fatalf("lifecycleEndpointOptions len = %d, want 2", len(lifecycleEndpointOptions(cfg)))
 	}
 }
 

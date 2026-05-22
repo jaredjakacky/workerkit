@@ -1,8 +1,9 @@
-package workerkit
+package workerkit_test
 
 import (
 	"context"
 	"errors"
+	. "github.com/jaredjakacky/workerkit"
 	"testing"
 )
 
@@ -27,14 +28,28 @@ func TestWorkerRuntimeFromContext(t *testing.T) {
 		t.Fatalf("background context returned runtime=%#v ok=%v, want nil false", got, ok)
 	}
 
-	want := fakeWorkerRuntime{}
-	ctx := withWorkerRuntime(context.Background(), want)
-	got, ok := WorkerRuntimeFromContext(ctx)
-	if !ok {
-		t.Fatal("WorkerRuntimeFromContext ok = false, want true")
+	var got WorkerRuntime
+	rt := newTestRuntime(t)
+	if err := rt.Register(WorkerSpec{
+		Name: "worker",
+		Worker: testWorker{
+			start: func(ctx context.Context) error {
+				var ok bool
+				got, ok = WorkerRuntimeFromContext(ctx)
+				if !ok {
+					t.Fatal("WorkerRuntimeFromContext ok = false, want true")
+				}
+				return nil
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
 	}
-	if got != want {
-		t.Fatalf("WorkerRuntimeFromContext returned %#v, want %#v", got, want)
+	if err := rt.Start(context.Background(), "worker"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("WorkerRuntimeFromContext returned nil")
 	}
 }
 

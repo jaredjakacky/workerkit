@@ -1,8 +1,9 @@
-package retry
+package retry_test
 
 import (
 	"errors"
 	"fmt"
+	. "github.com/jaredjakacky/workerkit/retry"
 	"testing"
 	"time"
 )
@@ -198,30 +199,4 @@ func TestPolicyClampsNegativeDelayAfterJitter(t *testing.T) {
 	if delay != 0 {
 		t.Fatalf("delay = %s, want 0", delay)
 	}
-}
-
-func TestConfigPolicyClampsNegativeDelayFromCustomJitter(t *testing.T) {
-	t.Parallel()
-
-	policy := configPolicy{
-		maxAttempts: 2,
-		backoff:     Constant(time.Second),
-		jitter: rawJitterFunc(func(time.Duration, int) time.Duration {
-			return -time.Second
-		}),
-	}
-
-	delay, ok := policy.NextDelay(1, errors.New("failed"))
-	if !ok {
-		t.Fatal("ok = false, want true")
-	}
-	if delay != 0 {
-		t.Fatalf("delay = %s, want 0", delay)
-	}
-}
-
-type rawJitterFunc func(time.Duration, int) time.Duration
-
-func (f rawJitterFunc) Apply(base time.Duration, attempt int) time.Duration {
-	return f(base, attempt)
 }

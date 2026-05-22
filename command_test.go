@@ -1,9 +1,10 @@
-package workerkit
+package workerkit_test
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	. "github.com/jaredjakacky/workerkit"
 	"strings"
 	"testing"
 	"time"

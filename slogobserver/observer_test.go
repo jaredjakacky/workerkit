@@ -1,8 +1,9 @@
-package slogobserver
+package slogobserver_test
 
 import (
 	"context"
 	"errors"
+	. "github.com/jaredjakacky/workerkit/slogobserver"
 	"log/slog"
 	"sync"
 	"testing"
@@ -72,19 +73,16 @@ func (h *captureHandler) lastRecord(t *testing.T) capturedRecord {
 func TestNewAppliesDefaultsAndOptions(t *testing.T) {
 	t.Parallel()
 
-	observer := New(nil, nil, WithLevel(slog.LevelDebug), WithAttributes(slog.String("service", "orders")))
+	handler := &captureHandler{}
+	observer := New(slog.New(handler), nil, WithLevel(slog.LevelDebug), WithAttributes(slog.String("service", "orders")))
 	if observer == nil {
 		t.Fatal("New returned nil")
 	}
-	if observer.logger == nil {
-		t.Fatal("logger = nil, want default logger")
-	}
-	if observer.config.level != slog.LevelDebug {
-		t.Fatalf("level = %s, want debug", observer.config.level)
-	}
-	if len(observer.config.attrs) != 1 || observer.config.attrs[0].Key != "service" {
-		t.Fatalf("attrs = %#v, want service attr", observer.config.attrs)
-	}
+	observer.ObserveReadiness(context.Background(), workerkit.ReadinessEvent{Runtime: "runtime", Ready: true})
+
+	record := handler.lastRecord(t)
+	requireRecord(t, record, slog.LevelDebug, "workerkit readiness change")
+	requireStringAttr(t, record, "service", "orders")
 }
 
 func TestObserveTransitionLogsLifecycleAttrs(t *testing.T) {

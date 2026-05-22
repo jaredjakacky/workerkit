@@ -1,8 +1,9 @@
-package opshttp
+package opshttp_test
 
 import (
 	"context"
 	"encoding/json"
+	. "github.com/jaredjakacky/workerkit/opshttp"
 	"net/http"
 	"testing"
 
@@ -20,7 +21,10 @@ func TestStatusRuntimeRoute(t *testing.T) {
 	assertStatus(t, rec, http.StatusOK)
 
 	var body struct {
-		Data runtimeDescriptor `json:"data"`
+		Data struct {
+			Identity workerkit.Identity      `json:"identity"`
+			Status   workerkit.RuntimeStatus `json:"status"`
+		} `json:"data"`
 	}
 	decodeResponse(t, rec.Body.Bytes(), &body)
 	if body.Data.Identity.Name != "ops" {

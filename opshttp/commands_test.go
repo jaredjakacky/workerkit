@@ -1,10 +1,10 @@
-package opshttp
+package opshttp_test
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
+	. "github.com/jaredjakacky/workerkit/opshttp"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -95,160 +95,6 @@ func TestDispatchRejectsInvalidCommandRequest(t *testing.T) {
 	rec := postDispatch(t, server, `{"worker":"worker","name":"Bad Command"}`)
 	assertStatus(t, rec, http.StatusBadRequest)
 	assertErrorBody(t, rec, "invalid command name")
-}
-
-func TestMapDispatchError(t *testing.T) {
-	t.Parallel()
-
-	rt, err := workerkit.New(workerkit.Identity{Name: "ops"})
-	if err != nil {
-		t.Fatalf("New returned error: %v", err)
-	}
-	if err := rt.Register(
-		workerkit.WorkerSpec{Name: "worker", Worker: testWorker{}},
-		workerkit.WithCommand("echo", workerkit.CommandHandlerFunc(func(context.Context, workerkit.CommandRequest) (workerkit.CommandResult, error) {
-			return workerkit.CommandResult{}, nil
-		})),
-	); err != nil {
-		t.Fatalf("Register returned error: %v", err)
-	}
-
-	if err := mapDispatchError(rt, "worker", "echo", nil); err != nil {
-		t.Fatalf("nil error mapped to %v, want nil", err)
-	}
-
-	tests := []struct {
-		name       string
-		worker     string
-		command    string
-		err        error
-		wantStatus int
-		want       string
-	}{
-		{
-			name:       "worker not found sentinel",
-			worker:     "missing",
-			command:    "echo",
-			err:        workerkit.ErrWorkerNotFound,
-			wantStatus: http.StatusNotFound,
-			want:       `worker "missing" not found`,
-		},
-		{
-			name:       "command not found sentinel",
-			worker:     "worker",
-			command:    "missing",
-			err:        workerkit.ErrCommandNotFound,
-			wantStatus: http.StatusNotFound,
-			want:       `command "missing" not found`,
-		},
-		{
-			name:       "runtime not accepting work",
-			worker:     "worker",
-			command:    "echo",
-			err:        workerkit.ErrRuntimeNotAcceptingWork,
-			wantStatus: http.StatusServiceUnavailable,
-			want:       workerkit.ErrRuntimeNotAcceptingWork.Error(),
-		},
-		{
-			name:       "worker not accepting work",
-			worker:     "worker",
-			command:    "echo",
-			err:        workerkit.ErrWorkerNotAcceptingWork,
-			wantStatus: http.StatusConflict,
-			want:       workerkit.ErrWorkerNotAcceptingWork.Error(),
-		},
-		{
-			name:       "invalid worker state",
-			worker:     "worker",
-			command:    "echo",
-			err:        workerkit.ErrInvalidWorkerState,
-			wantStatus: http.StatusConflict,
-			want:       workerkit.ErrInvalidWorkerState.Error(),
-		},
-		{
-			name:       "runtime saturated",
-			worker:     "worker",
-			command:    "echo",
-			err:        workerkit.ErrRuntimeSaturated,
-			wantStatus: http.StatusTooManyRequests,
-			want:       workerkit.ErrRuntimeSaturated.Error(),
-		},
-		{
-			name:       "worker saturated",
-			worker:     "worker",
-			command:    "echo",
-			err:        workerkit.ErrWorkerSaturated,
-			wantStatus: http.StatusTooManyRequests,
-			want:       workerkit.ErrWorkerSaturated.Error(),
-		},
-		{
-			name:       "unknown error missing command",
-			worker:     "worker",
-			command:    "missing",
-			err:        errors.New("handler failed before lookup"),
-			wantStatus: http.StatusNotFound,
-			want:       `command "missing" not found`,
-		},
-		{
-			name:       "unknown error missing worker",
-			worker:     "missing",
-			command:    "echo",
-			err:        errors.New("handler failed before lookup"),
-			wantStatus: http.StatusNotFound,
-			want:       `worker "missing" not found`,
-		},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			err := mapDispatchError(rt, tt.worker, tt.command, tt.err)
-			assertHTTPError(t, err, tt.wantStatus, tt.want)
-			if tt.wantStatus != http.StatusNotFound && !errors.Is(err, tt.err) {
-				t.Fatalf("mapped error does not wrap original error: %v", err)
-			}
-		})
-	}
-
-	boom := errors.New("handler failed")
-	if got := mapDispatchError(rt, "worker", "echo", boom); got != boom {
-		t.Fatalf("known command unknown error = %v, want original error", got)
-	}
-}
-
-func TestContainsWorkerAndCommand(t *testing.T) {
-	t.Parallel()
-
-	rt, err := workerkit.New(workerkit.Identity{Name: "ops"})
-	if err != nil {
-		t.Fatalf("New returned error: %v", err)
-	}
-	if err := rt.Register(
-		workerkit.WorkerSpec{Name: "worker", Worker: testWorker{}},
-		workerkit.WithCommand("echo", workerkit.CommandHandlerFunc(func(context.Context, workerkit.CommandRequest) (workerkit.CommandResult, error) {
-			return workerkit.CommandResult{}, nil
-		})),
-	); err != nil {
-		t.Fatalf("Register returned error: %v", err)
-	}
-
-	if !containsWorker("worker", rt) {
-		t.Fatal("containsWorker(worker) = false, want true")
-	}
-	if containsWorker("missing", rt) {
-		t.Fatal("containsWorker(missing) = true, want false")
-	}
-	if !containsCommand("worker", "echo", rt) {
-		t.Fatal("containsCommand(worker, echo) = false, want true")
-	}
-	if containsCommand("worker", "missing", rt) {
-		t.Fatal("containsCommand(worker, missing) = true, want false")
-	}
-	if containsCommand("missing", "echo", rt) {
-		t.Fatal("containsCommand(missing, echo) = true, want false")
-	}
 }
 
 func newDispatchServer(t *testing.T, handler workerkit.CommandHandler) *servekit.Server {

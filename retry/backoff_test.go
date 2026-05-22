@@ -1,10 +1,13 @@
-package retry
+package retry_test
 
 import (
+	. "github.com/jaredjakacky/workerkit/retry"
 	"math"
 	"testing"
 	"time"
 )
+
+const maxTestDuration = time.Duration(1<<63 - 1)
 
 func TestBackoffFuncClampsNegativeDelay(t *testing.T) {
 	t.Parallel()
@@ -62,7 +65,7 @@ func TestLinear(t *testing.T) {
 		{name: "negative step clamps", step: -time.Second, attempt: 3, want: 0},
 		{name: "max caps delay", step: 10 * time.Millisecond, max: 25 * time.Millisecond, attempt: 3, want: 25 * time.Millisecond},
 		{name: "negative max means uncapped", step: 10 * time.Millisecond, max: -time.Second, attempt: 3, want: 30 * time.Millisecond},
-		{name: "overflow caps at max duration", step: maxDuration / 2, attempt: 3, want: maxDuration},
+		{name: "overflow caps at max duration", step: maxTestDuration / 2, attempt: 3, want: maxTestDuration},
 	}
 
 	for _, tc := range tests {
@@ -97,7 +100,7 @@ func TestExponential(t *testing.T) {
 		{name: "nan multiplier becomes one", initial: 10 * time.Millisecond, multiplier: math.NaN(), attempt: 4, want: 10 * time.Millisecond},
 		{name: "max caps delay", initial: 10 * time.Millisecond, multiplier: 2, max: 50 * time.Millisecond, attempt: 4, want: 50 * time.Millisecond},
 		{name: "negative max means uncapped", initial: 10 * time.Millisecond, multiplier: 2, max: -time.Second, attempt: 4, want: 80 * time.Millisecond},
-		{name: "infinite multiplier caps at max duration", initial: time.Second, multiplier: math.Inf(1), attempt: 2, want: maxDuration},
+		{name: "infinite multiplier caps at max duration", initial: time.Second, multiplier: math.Inf(1), attempt: 2, want: maxTestDuration},
 	}
 
 	for _, tc := range tests {
@@ -115,49 +118,8 @@ func TestExponential(t *testing.T) {
 func TestExponentialCapsLargeFiniteDelay(t *testing.T) {
 	t.Parallel()
 
-	got := Exponential(maxDuration/2, 2, 0).Delay(2)
-	if got != maxDuration {
+	got := Exponential(maxTestDuration/2, 2, 0).Delay(2)
+	if got != maxTestDuration {
 		t.Fatalf("Delay = %s, want maxDuration", got)
-	}
-}
-
-func TestClampDuration(t *testing.T) {
-	t.Parallel()
-
-	if got := clampDuration(-time.Nanosecond); got != 0 {
-		t.Fatalf("negative clamp = %s, want 0", got)
-	}
-	if got := clampDuration(time.Second); got != time.Second {
-		t.Fatalf("positive clamp = %s, want 1s", got)
-	}
-}
-
-func TestDurationFromBackoffFloat(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name  string
-		delay float64
-		limit time.Duration
-		want  time.Duration
-	}{
-		{name: "positive", delay: float64(10 * time.Millisecond), limit: time.Second, want: 10 * time.Millisecond},
-		{name: "zero", delay: 0, limit: time.Second, want: 0},
-		{name: "negative", delay: -1, limit: time.Second, want: 0},
-		{name: "nan", delay: math.NaN(), limit: time.Second, want: 0},
-		{name: "positive infinity", delay: math.Inf(1), limit: time.Second, want: time.Second},
-		{name: "negative infinity", delay: math.Inf(-1), limit: time.Second, want: time.Second},
-		{name: "limit", delay: float64(time.Second), limit: time.Second, want: time.Second},
-	}
-
-	for _, tc := range tests {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			if got := durationFromBackoffFloat(tc.delay, tc.limit); got != tc.want {
-				t.Fatalf("durationFromBackoffFloat() = %s, want %s", got, tc.want)
-			}
-		})
 	}
 }
