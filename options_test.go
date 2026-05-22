@@ -12,6 +12,27 @@ import (
 )
 
 func TestRuntimeOptionDefaultsApplyAtRegistration(t *testing.T) {
+	defaultRuntime := newTestRuntime(t)
+	if err := defaultRuntime.Register(WorkerSpec{Name: "default-worker", Worker: testWorker{}}); err != nil {
+		t.Fatalf("Register default worker returned error: %v", err)
+	}
+	if err := defaultRuntime.Start(context.Background(), "default-worker"); err != nil {
+		t.Fatalf("Start default worker returned error: %v", err)
+	}
+	defaultSnapshot, ok := defaultRuntime.Worker("default-worker")
+	if !ok {
+		t.Fatal("default worker missing")
+	}
+	if !defaultSnapshot.Status.Ready {
+		t.Fatal("default worker ready = false, want true")
+	}
+	if !defaultSnapshot.Status.AcceptingWork {
+		t.Fatal("default worker accepting work = false, want true")
+	}
+	if !defaultRuntime.Status().Ready {
+		t.Fatal("default runtime ready = false, want true")
+	}
+
 	rt := newTestRuntime(
 		t,
 		WithDefaultReadyOnStart(false),
@@ -37,6 +58,36 @@ func TestRuntimeOptionDefaultsApplyAtRegistration(t *testing.T) {
 	}
 	if !rt.Status().Ready {
 		t.Fatal("runtime ready = false, want fallback ready with no contributing workers")
+	}
+}
+
+func TestInvalidPolicyOptionsAreRejected(t *testing.T) {
+	if _, err := New(Identity{Name: "test-runtime"}, WithReadinessPolicy(ReadinessPolicy("bad"))); err == nil {
+		t.Fatal("New invalid readiness policy returned nil, want error")
+	}
+
+	if _, err := New(Identity{Name: "test-runtime"}, WithDefaultPanicPolicy(PanicPolicy("bad"))); err == nil {
+		t.Fatal("New invalid default panic policy returned nil, want error")
+	}
+
+	if _, err := New(Identity{Name: "test-runtime"}, WithDefaultFailurePolicy(FailurePolicy("bad"))); err == nil {
+		t.Fatal("New invalid default failure policy returned nil, want error")
+	}
+
+	rt := newTestRuntime(t)
+	if err := rt.Register(
+		WorkerSpec{Name: "worker", Worker: testWorker{}},
+		WithWorkerPanicPolicy(PanicPolicy("bad")),
+	); err == nil {
+		t.Fatal("Register invalid worker panic policy returned nil, want error")
+	}
+
+	rt = newTestRuntime(t)
+	if err := rt.Register(
+		WorkerSpec{Name: "worker", Worker: testWorker{}},
+		WithWorkerFailurePolicy(FailurePolicy("bad")),
+	); err == nil {
+		t.Fatal("Register invalid worker failure policy returned nil, want error")
 	}
 }
 
