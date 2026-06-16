@@ -83,6 +83,9 @@ func WithServekitOptions(opts ...servekit.Option) Option {
 // a convenience for services that only need Workerkit readiness. Applications
 // composing multiple Kit Series components should provide their shared registry
 // here.
+//
+// Do not pre-register the Workerkit runtime in this registry; NewManaged
+// registers it as a required Opskit component.
 func WithOpsRegistry(registry *opskit.Registry, opts ...servekit.OpsOption) Option {
 	return func(cfg *config) {
 		cfg.opsRegistry = registry

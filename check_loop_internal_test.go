@@ -3,6 +3,8 @@ package workerkit
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,6 +85,28 @@ func TestRunCheckLoopOnceRecoversPanics(t *testing.T) {
 	})
 	if !errors.Is(err, ErrCheckLoopPanicked) {
 		t.Fatalf("runCheckLoopOnce error = %v, want ErrCheckLoopPanicked", err)
+	}
+}
+
+func TestRunCheckLoopOnceUsesConfiguredPanicContext(t *testing.T) {
+	t.Parallel()
+
+	err := runCheckLoopOnce(
+		context.Background(),
+		&checkLoopRuntime{},
+		checkLoopConfig{panicErr: fmt.Errorf("opskit checker panicked: %w", ErrCheckLoopPanicked)},
+		func(context.Context) checkLoopOutcome {
+			panic("secret panic payload")
+		},
+	)
+	if !errors.Is(err, ErrCheckLoopPanicked) {
+		t.Fatalf("runCheckLoopOnce error = %v, want ErrCheckLoopPanicked", err)
+	}
+	if !strings.Contains(err.Error(), "opskit checker panicked") {
+		t.Fatalf("runCheckLoopOnce error = %v, want checker panic context", err)
+	}
+	if strings.Contains(err.Error(), "secret panic payload") {
+		t.Fatalf("runCheckLoopOnce error exposed panic payload: %v", err)
 	}
 }
 
