@@ -24,7 +24,7 @@ Workerkit pulls that operational layer into one reusable runtime. Applications r
 
 A Workerkit worker is still normal Go code. It can run a long-lived loop, watch external systems, consume from a broker, poll an API, maintain in-memory state, or expose domain-specific commands. Workerkit does not decide what the worker does. It gives the worker a predictable operational envelope.
 
-Workerkit also stands next to [Servekit](https://github.com/jaredjakacky/servekit) instead of reinventing an HTTP service layer. When a service needs an operations plane, the optional `opshttp` package mounts Workerkit status, inspection, command discovery, command dispatch, and readiness integration into a Servekit server. Servekit keeps owning the HTTP baseline. Workerkit adds worker-aware operations.
+Workerkit also stands next to [Opskit](https://github.com/jaredjakacky/opskit) and [Servekit](https://github.com/jaredjakacky/servekit) instead of reinventing an operations registry or HTTP service layer. In the composed Kit Series path, a Workerkit runtime is one Opskit component. Servekit consumes the Opskit registry for `/readyz` and generic read-only admin component routes. Workerkit stays transport-neutral; Servekit keeps owning the HTTP baseline.
 
 ## What you get
 
@@ -40,7 +40,8 @@ With one runtime, Workerkit gives you:
 - panic and failure policy
 - structured observer hooks
 - optional `slog` and OpenTelemetry adapters
-- optional Servekit-backed HTTP operations routes
+- Opskit component, readiness, and inspection support
+- optional Servekit-backed Workerkit command and lifecycle routes
 
 This is the operational layer teams rebuild around serious worker components. Workerkit makes it the baseline instead of the afterthought.
 
@@ -50,9 +51,16 @@ Workerkit is not a workflow engine, job queue, scheduler, or durable orchestrati
 
 It does not provide durable workflow state, queue persistence, distributed leasing, task assignment, or cross-service coordination. It does not replace brokers, databases, schedulers, or orchestrators. It does not own your domain model.
 
+Workerkit runtime state is process-local. In Kubernetes, that means pod-local.
+`/readyz`, Opskit admin component views, Workerkit inspection, command
+dispatch, and lifecycle controls describe or affect only the runtime in the
+process that handles the request. Workerkit does not provide deployment-wide
+worker orchestration, distributed locking, leader election, replica
+coordination, or fleet-wide command broadcast.
+
 It is also not an application framework. You still write normal Go workers, your own business loops, your own side effects, and your own command contracts. Workerkit is the runtime and control surface around those workers, not the application itself.
 
-And Workerkit is not fundamentally tied to HTTP. The core runtime is transport-agnostic. Commands, readiness, lifecycle, failure handling, and status all exist as ordinary Go concepts first. If you want an HTTP operations plane, the optional `opshttp` package mounts one into Servekit. If you do not, the same runtime works directly from Go code, tests, or another control surface.
+And Workerkit is not fundamentally tied to HTTP. The core runtime is transport-agnostic. Commands, readiness, lifecycle, failure handling, status, and Opskit inspection all exist as ordinary Go concepts first. If you want the Kit Series HTTP operations path, register the runtime in an Opskit registry and pass that registry to Servekit. If you want Workerkit-specific HTTP command or lifecycle routes, the optional `opshttp` package can mount those into Servekit.
 
 ## Good fit / not a fit
 
@@ -130,7 +138,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	status := runtime.Status()
+	status := runtime.RuntimeStatus()
 	fmt.Printf("runtime=%s state=%s ready=%t workers=%d\n",
 		status.Name, status.State, status.Ready, status.Workers)
 
@@ -225,24 +233,46 @@ Workerkit has a short normal path, but it is not limited to startup and shutdown
 - worker-owned command discovery and dispatch
 - structured `slog` observer support
 - OpenTelemetry observer support
-- Servekit-backed read-only operations routes
+- Opskit-backed readiness and generic admin inspection through Servekit
 - opt-in HTTP command dispatch and privileged lifecycle controls
 - managed Servekit service composition with `servekitservice.NewManaged`
 
 The advanced path is documented in [docs/advanced.md](docs/advanced.md), with policy details in [docs/policy.md](docs/policy.md) and Servekit composition in [docs/composition.md](docs/composition.md).
 
-## Servekit operations plane
+## Kit Series Operations Path
 
-Workerkit and [Servekit](https://github.com/jaredjakacky/servekit) can be used independently, but the optional `opshttp` package provides the canonical bridge between them.
+Workerkit, Opskit, and [Servekit](https://github.com/jaredjakacky/servekit) can be used independently. The preferred composed path is:
+
+- Workerkit runtime implements Opskit component, readiness, and inspection contracts.
+- The application registers the runtime in an Opskit registry.
+- Servekit consumes that registry with `servekit.WithOps(...)`.
+- Servekit presents `/readyz` and generic Opskit admin routes.
 
 Servekit owns the HTTP service baseline: server construction, middleware, authentication, readiness endpoints, request policy, endpoint timeouts, response handling, and service lifecycle. Workerkit owns worker runtime semantics: lifecycle, readiness, status, command dispatch, admission, failure policy, and telemetry.
 
-`opshttp` connects the two by mounting a Servekit-native operations surface for Workerkit runtime status, worker inspection, command discovery, command dispatch, and readiness integration.
+```go
+ops := opskit.NewRegistry()
+
+runtime, err := workerkit.New(workerkit.Identity{Name: "workers"})
+if err != nil {
+    return err
+}
+
+ops.MustRegister(runtime, opskit.Required())
+
+server := servekit.New(
+    servekit.WithOps(ops, servekit.WithOpsAdmin()),
+)
+```
+
+This gives Servekit a pod-local view of the Workerkit runtime. It reports only the runtime state inside this process; it is not a fleet-wide worker registry or distributed control plane.
+
+`opshttp` is still useful when you need Workerkit-specific HTTP operations, especially command dispatch or privileged lifecycle controls. It is no longer the primary read-only/readiness integration path for composed Kit Series services.
 
 ```go
 server := servekit.New(
     servekit.WithAddr(":8080"),
-    servekit.WithReadinessChecks(opshttp.ReadinessCheck(runtime)),
+    servekit.WithOps(ops, servekit.WithOpsAdmin()),
 )
 
 err := opshttp.Mount(server, runtime,
@@ -257,7 +287,9 @@ err := opshttp.Mount(server, runtime,
 )
 ```
 
-By default, `opshttp.Mount` exposes read-only operations routes:
+The standalone `opshttp.ReadinessCheck(runtime)` adapter remains available for services that use Servekit readiness checks without an Opskit registry.
+
+By default, `opshttp.Mount` still exposes read-only Workerkit-specific operations routes:
 
 - `GET /admin/runtime` returns runtime identity and aggregate status
 - `GET /admin/workers` returns worker snapshots
@@ -301,7 +333,7 @@ Command dispatch accepts raw JSON payloads and passes those bytes to `workerkit.
 - [Commands](docs/commands.md): worker-owned domain commands without tying them to HTTP
 - [Policy Guide](docs/policy.md): retry, backoff, jitter, concurrency, readiness, and failure policy
 - [Observability](docs/observability.md): core runtime observer events, structured logs, and OpenTelemetry
-- [Composition with Servekit](docs/composition.md): `servekitservice`, `opshttp`, and the Kit-series boundary
+- [Composition with Opskit and Servekit](docs/composition.md): Opskit registry integration, `servekitservice`, `opshttp`, and the Kit Series boundary
 - [Examples Guide](docs/examples.md): guided walkthrough of the runnable examples
 - [Advanced Guide](docs/advanced.md): advanced composition and customization patterns
 - [API Map](docs/api.md): human-friendly map of the exported surface

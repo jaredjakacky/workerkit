@@ -156,7 +156,7 @@ func printCommands(runtime *workerkit.Runtime, worker string) {
 
 func printStatus(runtime *workerkit.Runtime, label string) {
 	fmt.Printf("\n== %s ==\n", label)
-	status := runtime.Status()
+	status := runtime.RuntimeStatus()
 	fmt.Printf("runtime=%s state=%s ready=%t\n", status.Name, status.State, status.Ready)
 
 	for _, worker := range runtime.Workers() {

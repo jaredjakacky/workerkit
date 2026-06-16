@@ -57,7 +57,7 @@ func main() {
 		panic(err)
 	}
 
-	fmt.Printf("runtime ready: %v\n", runtime.Status().Ready)
+	fmt.Printf("runtime ready: %v\n", runtime.RuntimeStatus().Ready)
 	fmt.Printf("workers: %d\n", len(runtime.Workers()))
 
 	shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -96,8 +96,9 @@ You can directly:
 - test behavior with Go tests
 - attach observers
 
-Servekit integration is optional. It becomes useful when you want HTTP
-readiness, inspection, command dispatch, or lifecycle controls.
+Opskit and Servekit integration is optional. It becomes useful when you want
+HTTP readiness and generic admin inspection. `opshttp` can be added when you
+also want Workerkit-specific HTTP command dispatch or lifecycle controls.
 
 ## Next Steps
 

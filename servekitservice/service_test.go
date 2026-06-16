@@ -93,8 +93,8 @@ func TestNewManagedWiresReadiness(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("readyz before worker start status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
 	}
-	if !strings.Contains(rec.Body.String(), "worker runtime not ready") {
-		t.Fatalf("readyz body = %s, want worker runtime readiness reason", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "one or more readiness components are not ready") {
+		t.Fatalf("readyz body = %s, want Opskit readiness reason", rec.Body.String())
 	}
 
 	if err := rt.Start(context.Background(), "worker"); err != nil {

@@ -1,9 +1,9 @@
-# Composition with Servekit
+# Composition with Opskit and Servekit
 
-Workerkit and Servekit are separate kits with separate responsibilities.
+Workerkit, Opskit, and Servekit are separate kits with separate responsibilities.
 
-Workerkit owns worker runtime semantics. Servekit owns HTTP and service
-semantics.
+Workerkit owns worker runtime semantics. Opskit owns the common operational
+component registry and read models. Servekit owns HTTP and service semantics.
 
 ## Responsibility Boundary
 
@@ -30,8 +30,63 @@ Servekit owns:
 - response encoding
 - HTTP shutdown
 
-`opshttp` is the bridge between the kits. It exposes Workerkit operations
-through Servekit without making HTTP part of Workerkit core.
+Opskit is the primary composed Kit Series bridge for read-only operational
+state. `Runtime` implements Opskit component, readiness, and inspection
+contracts directly. Register the runtime as one Opskit component and pass the
+registry to Servekit:
+
+```go
+ops := opskit.NewRegistry()
+
+runtime, err := workerkit.New(workerkit.Identity{Name: "workers"})
+if err != nil {
+	return err
+}
+
+ops.MustRegister(runtime, opskit.Required())
+
+server := servekit.New(
+	servekit.WithOps(ops, servekit.WithOpsAdmin()),
+)
+```
+
+Servekit then uses the registry for `/readyz` and generic admin component
+routes such as:
+
+- `GET /admin/components`
+- `GET /admin/components/{name}`
+
+This is pod-local/runtime-local state. It describes the Workerkit runtime in
+this process; it is not a distributed worker registry.
+
+## Kubernetes and Multiple Replicas
+
+Workerkit runtime state is process-local. In Kubernetes, that means it is
+pod-local.
+
+`/readyz`, Opskit admin component views, Workerkit inspection, command dispatch,
+and lifecycle controls describe or affect only the Workerkit runtime in the
+process that handles the request.
+
+When a Service load-balances requests across replicas:
+
+- `/readyz` answers whether this pod is ready.
+- `/admin/components/{name}` shows this pod's runtime state.
+- `opshttp` command dispatch hits one replica.
+- `opshttp` lifecycle controls start, drain, or stop workers in one replica.
+
+Workerkit does not provide deployment-wide worker orchestration, distributed
+locking, leader election, replica coordination, or fleet-wide command
+broadcast.
+
+Workerkit is safe in multiple replicas when work distribution is handled by
+queues, streams, leases, databases, partition ownership, or idempotent
+reconciliation. Singleton workers require explicit external coordination such
+as a Kubernetes Lease, database lock, queue partition ownership, or a
+controller.
+
+Cluster-wide controls require a separate control-plane design. Do not assume an
+HTTP request through a Kubernetes Service controls every pod in a Deployment.
 
 ## Managed Service Path
 
@@ -52,34 +107,45 @@ server := service.Server()
 ```
 
 `NewManaged` runs the Servekit service shell and coordinates Workerkit startup
-and graceful shutdown. Workerkit still owns worker semantics; Servekit still
-owns HTTP serving and `/readyz`.
+and graceful shutdown. It wires Workerkit readiness into Servekit through
+Opskit. Workerkit still owns worker semantics; Servekit still owns HTTP serving
+and `/readyz`.
 
 `Service.Server()` exposes the Servekit server so the application can register
 normal HTTP routes.
 
-## Readiness
+## Readiness and Read-Only Inspection
 
-Workerkit readiness reaches Servekit through:
+The preferred path is Opskit:
 
-- `servekitservice.NewManaged`
-- `servekitservice.ReadinessOptions`
-- `opshttp.ReadinessCheck`
+- `Runtime.Status(ctx)` maps Workerkit lifecycle into Opskit's generic state vocabulary.
+- `Runtime.Readiness(ctx)` returns Workerkit's cached aggregate readiness.
+- `Runtime.Inspect(ctx)` returns safe Workerkit runtime and worker details for generic admin routes.
 
-The meaning of readiness still comes from Workerkit. Servekit owns the HTTP
-endpoint that reports it.
+Servekit owns the HTTP endpoint that reports readiness. Workerkit owns the
+readiness semantics. Opskit is the shared contract between them.
 
-## Read-Only Operations
+`servekitservice.ReadinessOptions(runtime)` also returns a Servekit option that
+registers the runtime with Opskit. The older `opshttp.ReadinessCheck(runtime)`
+adapter remains available for standalone Servekit users who do not want an
+Opskit registry.
 
-`opshttp.Mount` exposes read-only operations routes by default:
+## Workerkit-Specific HTTP Operations
+
+Use `opshttp.Mount` when you need Workerkit-specific HTTP routes. These are not
+the primary composed read-only path, but they remain useful for command dispatch
+and privileged lifecycle controls.
+
+`opshttp.Mount` exposes read-only Workerkit-specific routes by default:
 
 - `GET /admin/runtime`
 - `GET /admin/workers`
 - `GET /admin/worker?name=...`
 - `GET /admin/commands?worker=...`
 
-Read-only routes still expose operational information. Mount them only on an
-appropriate operations surface.
+Read-only routes still expose operational information. Prefer generic Opskit
+admin routes for composed services, and mount `opshttp` only when these
+Workerkit-specific routes are useful.
 
 ## Command Dispatch
 
@@ -99,7 +165,9 @@ Core Workerkit commands are transport-neutral. `opshttp` owns HTTP decoding,
 status codes, and response shape. Workerkit owns command routing and policy.
 
 Protect command dispatch with authentication, authorization, and audit logging
-in real deployments.
+in real deployments. In Kubernetes, command dispatch through a Service affects
+whichever pod receives the request unless you route directly to a specific pod
+or build a separate coordination plane.
 
 ## Admin Lifecycle Controls
 
@@ -122,7 +190,7 @@ This enables:
 
 These routes mutate runtime state. Do not expose them publicly. Protect them
 with authentication, authorization, request limits, route-specific timeouts,
-and audit logging.
+and audit logging. These are pod-local controls, not Deployment-wide controls.
 
 ## Endpoint Policy
 

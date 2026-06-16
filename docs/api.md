@@ -178,7 +178,7 @@ Everything else in this file exists to customize that path without turning worke
 
 ### Status and discovery
 
-- `Status()`
+- `RuntimeStatus()`
 
   Returns aggregate runtime status.
 
@@ -512,6 +512,68 @@ Default worker options are copied into each worker when it is registered. Later 
 
   Reports that `Start` found an existing loop lifecycle in progress.
 
+### Opskit check loops
+
+- `NewCheckLoop(...)`
+
+  Constructs a worker that periodically executes one `opskit.Checker`.
+  Workerkit owns background execution policy; the checked component remains
+  responsible for any cached dependency health state.
+
+- `NewCheckGroupLoop(...)`
+
+  Constructs a worker that periodically executes one `opskit.CheckGroup`.
+
+- `CheckLoopOption`
+
+  Configures an Opskit check loop worker.
+
+- `WithCheckInterval(...)`
+
+  Sets the steady-state interval between check executions.
+
+- `WithCheckInitialDelay(...)`
+
+  Delays the first check loop action after `Start`.
+
+- `WithCheckRunImmediately(...)`
+
+  Controls whether the loop executes once before waiting for the first interval.
+
+- `WithCheckTimeout(...)`
+
+  Sets a per-execution timeout.
+
+- `WithCheckJitter(...)`
+
+  Sets an optional function that adjusts each interval wait.
+
+- `WithCheckReadyOnSuccess(...)`
+
+  Controls whether ready check results mark the worker ready and not-ready
+  results mark it unready.
+
+- `WithCheckReportFailureOnNotReady(...)`
+
+  Controls whether not-ready check results are also reported as Workerkit worker
+  failures. Disabled by default.
+
+- `WithCheckResultObserver(...)`
+
+  Observes completed single-check results.
+
+- `WithCheckSummaryObserver(...)`
+
+  Observes completed check-group summaries.
+
+- `ErrNilChecker`
+
+  Reports that a check loop was constructed without a checker.
+
+- `ErrNilCheckGroup`
+
+  Reports that a check group loop was constructed without a group.
+
 ### Name validation
 
 - `ValidateRuntimeName(...)`
@@ -606,7 +668,9 @@ Default worker options are copied into each worker when it is registered. Later 
 
 - `ReadinessCheck(...)`
 
-  Adapts `Runtime.Status().Ready` into a Servekit readiness check.
+  Deprecated compatibility adapter for Servekit readiness checks. Prefer
+  registering the runtime with Opskit and passing the registry to Servekit with
+  `servekit.WithOps`.
 
 ### Route groups
 
@@ -655,17 +719,17 @@ Lifecycle controls are privileged and opt-in:
 
 ## Package `servekitservice`
 
-`servekitservice` wires Workerkit and Servekit together for the common microservice execution path.
+`servekitservice` wires Workerkit and Servekit together for the common microservice execution path. The managed path registers the Workerkit runtime with Opskit so Servekit can consume readiness and inspection through `servekit.WithOps`.
 
 ### Constructors
 
 - `NewManaged(...)`
 
-  Constructs a service with a Servekit server and Workerkit readiness already wired into `/readyz`. This is the preferred path when a Workerkit runtime belongs inside a Servekit service shell.
+  Constructs a service with a Servekit server and Workerkit readiness wired into `/readyz` through Opskit. This is the preferred helper when a Workerkit runtime belongs inside a Servekit service shell and the application does not need to build its own Opskit registry.
 
 - `New(...)`
 
-  Wraps an existing Servekit server. The caller must construct that server with `ReadinessOptions(runtime)` or `servekit.WithReadinessChecks(ReadinessCheck(runtime))` if `/readyz` should include Workerkit readiness.
+  Wraps an existing Servekit server. In composed Kit Series services, construct the server with an Opskit registry that contains the Workerkit runtime and pass it with `servekit.WithOps(...)`.
 
 - `Service`
 
@@ -683,11 +747,11 @@ Lifecycle controls are privileged and opt-in:
 
 - `ReadinessOptions(...)`
 
-  Returns Servekit options needed to include Workerkit runtime readiness in `/readyz`.
+  Returns Servekit options that register Workerkit runtime readiness with Servekit through Opskit.
 
 - `ReadinessCheck(...)`
 
-  Adapts Workerkit runtime readiness into a Servekit readiness check.
+  Deprecated compatibility adapter for standalone Servekit readiness checks when an Opskit registry is not used.
 
 ### Options
 

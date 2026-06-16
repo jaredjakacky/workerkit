@@ -87,7 +87,7 @@ func workerLifecycleResponse(runtime *workerkit.Runtime, name string) (workerkit
 func runtimeLifecycleResponse(runtime *workerkit.Runtime) runtimeDescriptor {
 	return runtimeDescriptor{
 		Identity: runtime.Identity(),
-		Status:   runtime.Status(),
+		Status:   runtime.RuntimeStatus(),
 	}
 }
 

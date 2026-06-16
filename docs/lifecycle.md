@@ -129,6 +129,10 @@ and `Stop` when you need a custom graceful sequence.
 Use `Shutdown` for CLIs, tests, and non-Servekit programs. Use
 `servekitservice.NewManaged` when Servekit owns the process HTTP lifecycle.
 
+HTTP lifecycle controls are not Kubernetes Deployment lifecycle controls. They
+mutate one Workerkit runtime in one process. Kubernetes rollout, termination,
+and multi-replica coordination remain Kubernetes and application concerns.
+
 ## Failure Reporting
 
 Worker startup and command failures are observed by Workerkit automatically.
@@ -150,13 +154,20 @@ Read [`policy.md`](policy.md) for policy guidance.
 
 ## Servekit Readiness
 
-Workerkit readiness is transport-neutral. Servekit integration uses the same
-runtime readiness through `opshttp.ReadinessCheck` or
-`servekitservice.NewManaged`.
+Workerkit readiness is transport-neutral. In the composed Kit Series path,
+register the Workerkit runtime in an Opskit registry and pass that registry to
+Servekit with `servekit.WithOps(...)`. Servekit then includes Workerkit runtime
+readiness in `/readyz` through Opskit.
+
+`servekitservice.NewManaged` and `servekitservice.ReadinessOptions` use that
+Opskit path for the common service shell. `opshttp.ReadinessCheck` remains as a
+standalone Servekit readiness adapter for users who are not using an Opskit
+registry.
 
 That keeps the boundary clear:
 
 - Workerkit owns runtime readiness semantics.
+- Opskit carries the component/readiness contract.
 - Servekit owns HTTP readiness endpoints such as `/readyz`.
 
 ## Examples

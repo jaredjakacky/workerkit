@@ -73,7 +73,7 @@ func TestRuntimeStatusJSONShape(t *testing.T) {
 
 func TestRuntimeStatusTracksRegisteredWorkerCount(t *testing.T) {
 	rt := newTestRuntime(t)
-	if got := rt.Status().Workers; got != 0 {
+	if got := rt.RuntimeStatus().Workers; got != 0 {
 		t.Fatalf("initial workers = %d, want 0", got)
 	}
 	if err := rt.Register(WorkerSpec{Name: "first", Worker: testWorker{}}); err != nil {
@@ -83,7 +83,7 @@ func TestRuntimeStatusTracksRegisteredWorkerCount(t *testing.T) {
 		t.Fatalf("Register second returned error: %v", err)
 	}
 
-	if got := rt.Status().Workers; got != 2 {
+	if got := rt.RuntimeStatus().Workers; got != 2 {
 		t.Fatalf("workers = %d, want 2", got)
 	}
 }
@@ -97,13 +97,13 @@ func TestRuntimeStatusReturnsClonedLastTransition(t *testing.T) {
 		t.Fatalf("Start returned error: %v", err)
 	}
 
-	status := rt.Status()
+	status := rt.RuntimeStatus()
 	if status.LastTransition == nil {
 		t.Fatal("LastTransition = nil, want transition")
 	}
 	status.LastTransition.From = StateFailed
 
-	fresh := rt.Status()
+	fresh := rt.RuntimeStatus()
 	if fresh.LastTransition == nil {
 		t.Fatal("fresh LastTransition = nil, want transition")
 	}
@@ -182,7 +182,7 @@ func TestStatusInFlightTracksRunningCommand(t *testing.T) {
 	}()
 	<-entered
 
-	runtimeStatus := rt.Status()
+	runtimeStatus := rt.RuntimeStatus()
 	if runtimeStatus.InFlight != 1 {
 		t.Fatalf("runtime InFlight = %d, want 1", runtimeStatus.InFlight)
 	}
@@ -198,7 +198,7 @@ func TestStatusInFlightTracksRunningCommand(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("Dispatch returned error: %v", err)
 	}
-	if got := rt.Status().InFlight; got != 0 {
+	if got := rt.RuntimeStatus().InFlight; got != 0 {
 		t.Fatalf("runtime InFlight after dispatch = %d, want 0", got)
 	}
 	snapshot, ok = rt.Worker("worker")

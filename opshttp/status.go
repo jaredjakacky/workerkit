@@ -16,7 +16,7 @@ func registerStatusRoutes(server *servekit.Server, runtime *workerkit.Runtime, c
 	server.Handle(http.MethodGet, routePath(cfg.prefix, runtimeRoute), func(r *http.Request) (any, error) {
 		return runtimeDescriptor{
 			Identity: runtime.Identity(),
-			Status:   runtime.Status(),
+			Status:   runtime.RuntimeStatus(),
 		}, nil
 	}, cfg.endpointOptions...)
 

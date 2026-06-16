@@ -37,7 +37,7 @@ func TestWorkerkitRuntimeDirectly(t *testing.T) {
 		t.Fatalf("StartAll returned error: %v", err)
 	}
 
-	status := runtime.Status()
+	status := runtime.RuntimeStatus()
 	if status.State != workerkit.StateRunning {
 		t.Fatalf("runtime state = %s, want %s", status.State, workerkit.StateRunning)
 	}
@@ -80,7 +80,7 @@ func TestWorkerkitRuntimeDirectly(t *testing.T) {
 		t.Fatalf("Shutdown returned error: %v", err)
 	}
 
-	status = runtime.Status()
+	status = runtime.RuntimeStatus()
 	if status.State != workerkit.StateStopped {
 		t.Fatalf("runtime state after shutdown = %s, want %s", status.State, workerkit.StateStopped)
 	}

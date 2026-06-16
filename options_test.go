@@ -29,7 +29,7 @@ func TestRuntimeOptionDefaultsApplyAtRegistration(t *testing.T) {
 	if !defaultSnapshot.Status.AcceptingWork {
 		t.Fatal("default worker accepting work = false, want true")
 	}
-	if !defaultRuntime.Status().Ready {
+	if !defaultRuntime.RuntimeStatus().Ready {
 		t.Fatal("default runtime ready = false, want true")
 	}
 
@@ -56,7 +56,7 @@ func TestRuntimeOptionDefaultsApplyAtRegistration(t *testing.T) {
 	if snapshot.Status.AcceptingWork {
 		t.Fatal("worker accepting work = true, want default false")
 	}
-	if !rt.Status().Ready {
+	if !rt.RuntimeStatus().Ready {
 		t.Fatal("runtime ready = false, want fallback ready with no contributing workers")
 	}
 }
@@ -423,7 +423,7 @@ func TestFailurePolicyOptions(t *testing.T) {
 		if err := workerRuntime.ReportFailure(errors.New("failed")); err != nil {
 			t.Fatalf("ReportFailure returned error: %v", err)
 		}
-		if rt.Status().Ready {
+		if rt.RuntimeStatus().Ready {
 			t.Fatal("runtime ready = true, want false")
 		}
 	})
@@ -455,8 +455,8 @@ func TestFailurePolicyOptions(t *testing.T) {
 		if err := workerRuntime.ReportFailure(errors.New("failed")); err != nil {
 			t.Fatalf("ReportFailure returned error: %v", err)
 		}
-		if rt.Status().State != StateFailed {
-			t.Fatalf("runtime state = %s, want %s", rt.Status().State, StateFailed)
+		if rt.RuntimeStatus().State != StateFailed {
+			t.Fatalf("runtime state = %s, want %s", rt.RuntimeStatus().State, StateFailed)
 		}
 	})
 }

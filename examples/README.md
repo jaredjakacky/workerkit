@@ -42,9 +42,9 @@ Read the examples in the order listed below. Each one builds on the last. By the
 
 ### Servekit Integration
 
-**[managed-service](managed-service)** — The preferred microservice shell. `servekitservice.NewManaged` wires Workerkit readiness into `/readyz` automatically, starts workers before serving, and drains and stops them gracefully on shutdown. Add application routes through `Service.Server()` while Workerkit owns worker lifecycle.
+**[managed-service](managed-service)** — The preferred microservice shell. `servekitservice.NewManaged` wires Workerkit readiness into Servekit through Opskit automatically, starts workers before serving, and drains and stops them gracefully on shutdown. Add application routes through `Service.Server()` while Workerkit owns worker lifecycle.
 
-**[opshttp-basic](opshttp-basic)** — One `opshttp.Mount` call exposes runtime status, worker inspection, command discovery, and readiness over HTTP. Read-only by default. No lifecycle mutation without explicit opt-in.
+**[opshttp-basic](opshttp-basic)** — Standalone Workerkit-to-Servekit operations routes. Useful when you want Workerkit-specific read-only routes without using generic Opskit admin component routes. No lifecycle mutation without explicit opt-in.
 
 **[opshttp-commands](opshttp-commands)** — Opt-in HTTP command dispatch. Includes success paths, invalid request handling, missing target mapping, saturation responses, and how to apply endpoint policy to the dispatch route specifically.
 
@@ -52,7 +52,7 @@ Read the examples in the order listed below. Each one builds on the last. By the
 
 ### The Full Picture
 
-**[production-composition](production-composition)** — The full composition. Multiple workers, readiness, commands, retry, concurrency limits, failure policy, slog observability, Servekit service lifecycle, protected read-only ops, opt-in mutating ops, and graceful shutdown. This is the target shape for a production Workerkit service.
+**[production-composition](production-composition)** — The full composition. Multiple workers, Opskit registry integration, Servekit `/readyz` and generic admin component inspection, commands, retry, concurrency limits, failure policy, slog observability, opt-in mutating ops, and graceful shutdown. This is the target shape for a production Workerkit service.
 
 ---
 

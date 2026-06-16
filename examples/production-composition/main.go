@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	opskit "github.com/jaredjakacky/opskit"
 	"github.com/jaredjakacky/servekit"
 	workerkit "github.com/jaredjakacky/workerkit"
 	"github.com/jaredjakacky/workerkit/opshttp"
@@ -32,7 +33,7 @@ func main() {
 		Level: slog.LevelInfo,
 	}))
 
-	// This example demonstrates the Kit-series composition: Workerkit owns worker
+	// This example demonstrates the Kit Series composition: Workerkit owns worker
 	// lifecycle, readiness, commands, retry, concurrency, and failure policy;
 	// Servekit owns HTTP serving, readiness endpoints, route policy, and shutdown.
 	runtime, err := workerkit.New(workerkit.Identity{Name: "catalog_service"},
@@ -58,6 +59,12 @@ func main() {
 	registerIndex(runtime, state, commandRetry)
 	registerMaintenance(runtime, state)
 
+	// Workerkit speaks Opskit directly. Register the runtime as one required
+	// Opskit component so Servekit can use the generic registry for /readyz and
+	// read-only admin component inspection.
+	ops := opskit.NewRegistry()
+	ops.MustRegister(runtime, opskit.Required())
+
 	opsPolicy := []servekit.EndpointOption{
 		servekit.WithAuthGate(requireOpsToken),
 		servekit.WithEndpointMiddleware(auditOpsRequest(logger)),
@@ -67,11 +74,21 @@ func main() {
 		servekit.WithBodyLimit(1 << 20),
 	}
 
-	// opshttp is the bridge between the kits: it exposes Workerkit operations
-	// through Servekit without making HTTP part of Workerkit core.
+	server := servekit.New(
+		servekit.WithAddr(":8080"),
+		servekit.WithBuildInfo("dev", "local", time.Now().UTC().Format(time.RFC3339)),
+		servekit.WithOps(ops,
+			servekit.WithOpsAdmin(),
+			servekit.WithOpsAdminAuthGate(requireOpsToken),
+		),
+	)
+
+	// Opskit is the primary read-only integration path. opshttp remains useful
+	// for Workerkit-specific mutating operations such as command dispatch and
+	// privileged lifecycle controls.
 	opsOptions := []opshttp.Option{
 		// Apply the shared operations policy to every /admin route, including
-		// read-only inspection routes, because they expose operational state.
+		// command and lifecycle routes, because they expose or mutate operational state.
 		opshttp.WithEndpointOptions(opsPolicy...),
 		opshttp.WithCommandDispatchEnabled(),
 		opshttp.WithAdminLifecycleControlsEnabled(),
@@ -81,11 +98,7 @@ func main() {
 		opshttp.WithLifecycleOptions(mutatingOpsPolicy...),
 	}
 
-	service, err := servekitservice.NewManaged(runtime,
-		servekitservice.WithServekitOptions(
-			servekit.WithAddr(":8080"),
-			servekit.WithBuildInfo("dev", "local", time.Now().UTC().Format(time.RFC3339)),
-		),
+	service, err := servekitservice.New(runtime, server,
 		servekitservice.WithOpsHTTPEnabled(true),
 		servekitservice.WithOpsHTTPOptions(opsOptions...),
 		servekitservice.WithShutdownTimeout(20*time.Second),
@@ -94,8 +107,8 @@ func main() {
 		log.Fatal(err)
 	}
 
-	service.Server().Handle(http.MethodGet, "/app/status", func(r *http.Request) (any, error) {
-		status := runtime.Status()
+	server.Handle(http.MethodGet, "/app/status", func(r *http.Request) (any, error) {
+		status := runtime.RuntimeStatus()
 		snapshot := state.snapshot()
 		return map[string]any{
 			"service":      "catalog-service",
@@ -107,7 +120,7 @@ func main() {
 			"runtimeName":  status.Name,
 		}, nil
 	})
-	service.Server().Handle(http.MethodGet, "/app/search", func(r *http.Request) (any, error) {
+	server.Handle(http.MethodGet, "/app/search", func(r *http.Request) (any, error) {
 		query := r.URL.Query().Get("q")
 		snapshot := state.snapshot()
 		return map[string]any{
@@ -371,7 +384,8 @@ func printCurlCommands() {
 	fmt.Println("try:")
 	fmt.Println("  curl -i http://localhost:8080/app/status")
 	fmt.Println("  curl -i http://localhost:8080/readyz")
-	fmt.Println("  curl -s -H 'X-Ops-Token: dev-secret' http://localhost:8080/admin/runtime")
+	fmt.Println("  curl -s -H 'X-Ops-Token: dev-secret' http://localhost:8080/admin/components")
+	fmt.Println("  curl -s -H 'X-Ops-Token: dev-secret' http://localhost:8080/admin/components/catalog_service")
 	fmt.Println(`  curl -i -X POST http://localhost:8080/admin/commands/dispatch -H 'Content-Type: application/json' -H 'X-Ops-Token: dev-secret' -d '{"worker":"ingest","name":"ingest/enqueue","payload":{"documentID":"doc-123","title":"Workerkit"}}'`)
 	fmt.Println(`  curl -i -X POST http://localhost:8080/admin/commands/dispatch -H 'Content-Type: application/json' -H 'X-Ops-Token: dev-secret' -d '{"worker":"index","name":"index/rebuild"}'`)
 	fmt.Println(`  curl -i -X POST http://localhost:8080/admin/runtime/drain -H 'X-Ops-Token: dev-secret'`)

@@ -125,6 +125,23 @@ bind a Workerkit runtime into it.
 
 Use direct `Runtime` methods when there is no HTTP service.
 
+## Multiple Replicas and Singleton Work
+
+Workerkit manages workers inside one process. It is safe to run the same
+Workerkit service in multiple Kubernetes replicas when work distribution is
+handled by queues, streams, leases, databases, partition ownership, or
+idempotent reconciliation.
+
+Singleton workers need explicit external coordination. Use a Kubernetes Lease,
+database lock, queue partition ownership, controller, or another coordination
+mechanism that fits the domain. Workerkit does not provide leader election,
+distributed locking, task assignment, or fleet-wide command broadcast.
+
+Active HTTP controls are also process-local. Through a Kubernetes Service, a
+command dispatch or lifecycle request affects whichever pod receives the
+request. Route directly to a pod or build a separate control plane when you
+need targeted or cluster-wide control.
+
 ## Out of Scope
 
 Workerkit intentionally does not provide:
