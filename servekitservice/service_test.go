@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	opskit "github.com/jaredjakacky/opskit"
 	"github.com/jaredjakacky/servekit"
 	workerkit "github.com/jaredjakacky/workerkit"
 	"github.com/jaredjakacky/workerkit/opshttp"
@@ -107,6 +108,102 @@ func TestNewManagedWiresReadiness(t *testing.T) {
 	rec = performRequest(service.Server(), http.MethodGet, "/readyz")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("readyz after worker start status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}
+
+func TestNewManagedUsesProvidedOpsRegistry(t *testing.T) {
+	t.Parallel()
+
+	ops := opskit.NewRegistry()
+	ops.MustRegister(opskit.ComponentFunc{
+		Info: opskit.ComponentInfo{Name: "config", Kind: "config"},
+		Fn: func(context.Context) opskit.Status {
+			return opskit.ReadyStatus("configuration loaded")
+		},
+	}, opskit.Required())
+	rt := newTestRuntime(t)
+	if err := rt.Register(workerkit.WorkerSpec{Name: "worker", Worker: testWorker{}}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	service, err := NewManaged(
+		rt,
+		WithOpsRegistry(ops),
+		WithServekitOptions(servekit.WithAddr("127.0.0.1:0")),
+	)
+	if err != nil {
+		t.Fatalf("NewManaged returned error: %v", err)
+	}
+	service.Server().SetReady(true)
+
+	if _, ok := ops.Component("config"); !ok {
+		t.Fatal("existing config component missing from provided registry")
+	}
+	if _, ok := ops.Component("service"); !ok {
+		t.Fatal("workerkit runtime missing from provided registry")
+	}
+	if entries := ops.Entries(); len(entries) != 2 {
+		t.Fatalf("registry entries = %d, want 2", len(entries))
+	}
+
+	rec := performRequest(service.Server(), http.MethodGet, "/readyz")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readyz before worker start status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+
+	if err := rt.Start(context.Background(), "worker"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = rt.Stop(context.Background(), "worker")
+	})
+
+	rec = performRequest(service.Server(), http.MethodGet, "/readyz")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("readyz after worker start status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}
+
+func TestNewManagedPreservesOpsAdminOptionsForProvidedRegistry(t *testing.T) {
+	t.Parallel()
+
+	ops := opskit.NewRegistry()
+	ops.MustRegister(opskit.ComponentFunc{
+		Info: opskit.ComponentInfo{Name: "config", Kind: "config"},
+		Fn: func(context.Context) opskit.Status {
+			return opskit.ReadyStatus("configuration loaded")
+		},
+	}, opskit.Required())
+	rt := newTestRuntime(t)
+
+	service, err := NewManaged(
+		rt,
+		WithOpsRegistry(ops, servekit.WithOpsAdmin()),
+		WithServekitOptions(servekit.WithAddr("127.0.0.1:0")),
+	)
+	if err != nil {
+		t.Fatalf("NewManaged returned error: %v", err)
+	}
+
+	rec := performRequest(service.Server(), http.MethodGet, "/admin/components")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/admin/components status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"name":"config"`) {
+		t.Fatalf("/admin/components body missing config component: %s", body)
+	}
+	if !strings.Contains(body, `"name":"service"`) {
+		t.Fatalf("/admin/components body missing workerkit runtime: %s", body)
+	}
+}
+
+func TestNewManagedRejectsNilOpsRegistry(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewManaged(newTestRuntime(t), WithOpsRegistry(nil))
+	if err == nil || !strings.Contains(err.Error(), "WithOpsRegistry requires non-nil registry") {
+		t.Fatalf("NewManaged error = %v, want nil registry error", err)
 	}
 }
 

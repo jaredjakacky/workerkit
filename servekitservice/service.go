@@ -22,6 +22,9 @@ const stopFallbackTimeout = 5 * time.Second
 type config struct {
 	opsHTTPEnabled         bool
 	opsHTTPOptions         []opshttp.Option
+	opsRegistry            *opskit.Registry
+	opsRegistrySet         bool
+	opsOptions             []servekit.OpsOption
 	servekitOptions        []servekit.Option
 	startWorkers           bool
 	gracefulWorkerShutdown bool
@@ -65,10 +68,26 @@ func WithOpsHTTPOptions(opts ...opshttp.Option) Option {
 
 // WithServekitOptions appends options used when NewManaged constructs the
 // Servekit server. New rejects this option because the caller already supplied
-// a server.
+// a server. When using NewManaged, pass Opskit registry composition through
+// WithOpsRegistry instead of passing servekit.WithOps through this option.
 func WithServekitOptions(opts ...servekit.Option) Option {
 	return func(cfg *config) {
 		cfg.servekitOptions = append(cfg.servekitOptions, opts...)
+	}
+}
+
+// WithOpsRegistry configures the Opskit registry NewManaged passes to Servekit.
+//
+// NewManaged registers the Workerkit runtime into this registry as one required
+// component. If this option is omitted, NewManaged creates a private registry as
+// a convenience for services that only need Workerkit readiness. Applications
+// composing multiple Kit Series components should provide their shared registry
+// here.
+func WithOpsRegistry(registry *opskit.Registry, opts ...servekit.OpsOption) Option {
+	return func(cfg *config) {
+		cfg.opsRegistry = registry
+		cfg.opsRegistrySet = true
+		cfg.opsOptions = append(cfg.opsOptions, opts...)
 	}
 }
 
@@ -128,9 +147,11 @@ func defaultConfig() config {
 // NewManaged constructs a Workerkit service runner with a Servekit server.
 //
 // NewManaged wires Workerkit into Servekit's Opskit registry during server
-// construction.
-// It is the preferred constructor when Workerkit owns the service shell. Use
-// Service.Server to register application routes before calling Run.
+// construction. It is a convenience constructor for services that want this
+// package to construct the Servekit server. Applications still own composition;
+// pass a shared Opskit registry with WithOpsRegistry when the service has other
+// Opskit components. Use Service.Server to register application routes before
+// calling Run.
 func NewManaged(runtime *workerkit.Runtime, opts ...Option) (*Service, error) {
 	if runtime == nil {
 		return nil, opshttp.ErrNilRuntime
@@ -143,8 +164,12 @@ func NewManaged(runtime *workerkit.Runtime, opts ...Option) (*Service, error) {
 		}
 	}
 
+	opsRegistry, err := managedOpsRegistry(runtime, cfg)
+	if err != nil {
+		return nil, err
+	}
 	serverOpts := append([]servekit.Option{}, cfg.servekitOptions...)
-	serverOpts = append(serverOpts, ReadinessOptions(runtime)...)
+	serverOpts = append(serverOpts, servekit.WithOps(opsRegistry, cfg.opsOptions...))
 	server := servekit.New(serverOpts...)
 
 	return newWithConfig(runtime, server, cfg)
@@ -159,13 +184,19 @@ func NewManaged(runtime *workerkit.Runtime, opts ...Option) (*Service, error) {
 // opshttp.WithCommandDispatchEnabled and
 // opshttp.WithAdminLifecycleControlsEnabled.
 //
-// Servekit does not expose a public API for adding readiness checks after
+// Servekit does not expose a public API for adding Opskit readiness after
 // construction. Callers that want /readyz to include Workerkit readiness should
-// construct the server with:
+// register the runtime in a shared Opskit registry and construct the server
+// with:
 //
-//	servekitservice.ReadinessOptions(runtime)...
+//	ops := opskit.NewRegistry()
+//	ops.MustRegister(runtime, opskit.Required())
+//	server := servekit.New(
+//		servekit.WithOps(ops, servekit.WithOpsAdmin()),
+//	)
 //
-// or:
+// The standalone readiness adapter remains available for services that do not
+// use an Opskit registry:
 //
 //	servekit.WithReadinessChecks(servekitservice.ReadinessCheck(runtime))
 //
@@ -173,8 +204,8 @@ func NewManaged(runtime *workerkit.Runtime, opts ...Option) (*Service, error) {
 // Workerkit readiness wired. Without this wiring, /readyz may report ready while
 // the Workerkit runtime is unready.
 //
-// NewManaged is the preferred constructor when Workerkit owns Servekit
-// construction.
+// NewManaged is available when callers want this package to construct the
+// Servekit server.
 func New(runtime *workerkit.Runtime, server *servekit.Server, opts ...Option) (*Service, error) {
 	if runtime == nil {
 		return nil, opshttp.ErrNilRuntime
@@ -194,6 +225,21 @@ func New(runtime *workerkit.Runtime, server *servekit.Server, opts ...Option) (*
 	}
 
 	return newWithConfig(runtime, server, cfg)
+}
+
+func managedOpsRegistry(runtime *workerkit.Runtime, cfg config) (*opskit.Registry, error) {
+	registry := cfg.opsRegistry
+	if cfg.opsRegistrySet {
+		if registry == nil {
+			return nil, errors.New("servekitservice: WithOpsRegistry requires non-nil registry")
+		}
+	} else {
+		registry = opskit.NewRegistry()
+	}
+	if err := registry.Register(runtime, opskit.Required()); err != nil {
+		return nil, fmt.Errorf("register workerkit runtime with opskit: %w", err)
+	}
+	return registry, nil
 }
 
 func newWithConfig(runtime *workerkit.Runtime, server *servekit.Server, cfg config) (*Service, error) {
@@ -223,14 +269,14 @@ func (s *Service) Server() *servekit.Server {
 
 // ReadinessOptions returns the Servekit options needed to include Workerkit
 // runtime readiness in /readyz through Opskit.
-func ReadinessOptions(runtime *workerkit.Runtime) []servekit.Option {
+func ReadinessOptions(runtime *workerkit.Runtime, opts ...servekit.OpsOption) []servekit.Option {
 	registry := opskit.NewRegistry()
 	if runtime != nil {
 		registry.MustRegister(runtime, opskit.Required())
 	}
 
 	return []servekit.Option{
-		servekit.WithOps(registry),
+		servekit.WithOps(registry, opts...),
 	}
 }
 

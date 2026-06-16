@@ -16,6 +16,9 @@ var (
 	ErrNilChecker = errors.New("opskit checker must not be nil")
 	// ErrNilCheckGroup reports that a check group loop was constructed without a group.
 	ErrNilCheckGroup = errors.New("opskit check group must not be nil")
+	// ErrCheckLoopPanicked reports that a check loop recovered a panic from an
+	// Opskit check execution path.
+	ErrCheckLoopPanicked = errors.New("opskit check loop panicked")
 )
 
 // CheckResultObserver observes one completed Opskit check result.
@@ -108,7 +111,8 @@ func WithCheckReadyOnSuccess(enabled bool) CheckLoopOption {
 }
 
 // WithCheckReportFailureOnNotReady controls whether not-ready check results are
-// also reported as Workerkit worker failures. Disabled by default.
+// also reported as Workerkit worker failures and stop the check loop. Disabled
+// by default.
 func WithCheckReportFailureOnNotReady(enabled bool) CheckLoopOption {
 	return func(cfg *checkLoopConfig) {
 		cfg.reportFailureOnNotReady = enabled
@@ -130,7 +134,8 @@ func WithCheckSummaryObserver(observer CheckSummaryObserver) CheckLoopOption {
 }
 
 // NewCheckLoop constructs a Worker that periodically executes one Opskit
-// Checker. Workerkit owns the background execution policy; the checked
+// Checker. Workerkit owns the background execution policy, including timeout,
+// cancellation, panic recovery, and Workerkit failure reporting. The checked
 // component remains responsible for any cached dependency health state.
 func NewCheckLoop(checker opskit.Checker, opts ...CheckLoopOption) Worker {
 	cfg := newCheckLoopConfig(opts)
@@ -159,7 +164,8 @@ func NewCheckLoop(checker opskit.Checker, opts ...CheckLoopOption) Worker {
 }
 
 // NewCheckGroupLoop constructs a Worker that periodically executes one Opskit
-// CheckGroup. Workerkit owns the background execution policy; the checked
+// CheckGroup. Workerkit owns the background execution policy, including timeout,
+// cancellation, panic recovery, and Workerkit failure reporting. The checked
 // component remains responsible for any cached dependency health state.
 func NewCheckGroupLoop(group opskit.CheckGroup, opts ...CheckLoopOption) Worker {
 	cfg := newCheckLoopConfig(opts)
@@ -206,7 +212,7 @@ func runCheckLoop(ctx context.Context, runtime WorkerRuntime, cfg checkLoopConfi
 
 	if cfg.runImmediately {
 		if err := runCheckLoopOnce(ctx, runtime, cfg, run); err != nil {
-			return nil
+			return err
 		}
 	}
 
@@ -215,12 +221,18 @@ func runCheckLoop(ctx context.Context, runtime WorkerRuntime, cfg checkLoopConfi
 			return nil
 		}
 		if err := runCheckLoopOnce(ctx, runtime, cfg, run); err != nil {
-			return nil
+			return err
 		}
 	}
 }
 
-func runCheckLoopOnce(ctx context.Context, runtime WorkerRuntime, cfg checkLoopConfig, run func(context.Context) checkLoopOutcome) error {
+func runCheckLoopOnce(ctx context.Context, runtime WorkerRuntime, cfg checkLoopConfig, run func(context.Context) checkLoopOutcome) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = ErrCheckLoopPanicked
+		}
+	}()
+
 	checkCtx := ctx
 	cancel := func() {}
 	if cfg.timeout > 0 {
@@ -242,9 +254,11 @@ func runCheckLoopOnce(ctx context.Context, runtime WorkerRuntime, cfg checkLoopC
 		}
 	}
 	if !outcome.ready && cfg.reportFailureOnNotReady {
-		if err := runtime.ReportFailure(checkLoopNotReadyError(outcome)); err != nil {
+		err := checkLoopNotReadyError(outcome)
+		if err := runtime.ReportFailure(err); err != nil {
 			return err
 		}
+		return err
 	}
 	return nil
 }

@@ -94,7 +94,10 @@ Use `servekitservice.NewManaged` when a Workerkit runtime belongs inside a
 Servekit-backed HTTP service:
 
 ```go
+ops := opskit.NewRegistry()
+
 service, err := servekitservice.NewManaged(runtime,
+	servekitservice.WithOpsRegistry(ops, servekit.WithOpsAdmin()),
 	servekitservice.WithServekitOptions(
 		servekit.WithAddr(":8080"),
 	),
@@ -111,6 +114,11 @@ and graceful shutdown. It wires Workerkit readiness into Servekit through
 Opskit. Workerkit still owns worker semantics; Servekit still owns HTTP serving
 and `/readyz`.
 
+If `WithOpsRegistry` is omitted, `NewManaged` creates a private Opskit registry
+for convenience. Composed Kit Series services should pass the application's
+shared registry so Workerkit, Configkit, Clientkit, Dependkit, and other
+components appear in one Opskit read model.
+
 `Service.Server()` exposes the Servekit server so the application can register
 normal HTTP routes.
 
@@ -126,9 +134,9 @@ Servekit owns the HTTP endpoint that reports readiness. Workerkit owns the
 readiness semantics. Opskit is the shared contract between them.
 
 `servekitservice.ReadinessOptions(runtime)` also returns a Servekit option that
-registers the runtime with Opskit. The older `opshttp.ReadinessCheck(runtime)`
-adapter remains available for standalone Servekit users who do not want an
-Opskit registry.
+creates a small private Opskit registry for Workerkit-only readiness. The older
+`opshttp.ReadinessCheck(runtime)` adapter remains available for standalone
+Servekit users who do not want an Opskit registry.
 
 ## Workerkit-Specific HTTP Operations
 
