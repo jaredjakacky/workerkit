@@ -273,7 +273,7 @@ func TestCheckLoopPanicMarksWorkerFailed(t *testing.T) {
 	})
 
 	waitForCheckWorkerState(t, rt, StateFailed)
-	assertCheckLoopPanicFailure(t, rt, secret)
+	assertCheckLoopPanicFailure(t, rt, "opskit checker panicked", secret)
 }
 
 func TestCheckGroupLoopPanicMarksWorkerFailed(t *testing.T) {
@@ -293,7 +293,7 @@ func TestCheckGroupLoopPanicMarksWorkerFailed(t *testing.T) {
 	})
 
 	waitForCheckWorkerState(t, rt, StateFailed)
-	assertCheckLoopPanicFailure(t, rt, secret)
+	assertCheckLoopPanicFailure(t, rt, "opskit check group panicked", secret)
 }
 
 func TestCheckLoopCanLeaveReadinessUnmanaged(t *testing.T) {
@@ -448,7 +448,7 @@ func waitForCheckWorkerState(t *testing.T, rt *Runtime, want LifecycleState) {
 	}
 }
 
-func assertCheckLoopPanicFailure(t *testing.T, rt *Runtime, secret string) {
+func assertCheckLoopPanicFailure(t *testing.T, rt *Runtime, want string, secret string) {
 	t.Helper()
 
 	snapshot, ok := rt.Worker("checks")
@@ -459,6 +459,9 @@ func assertCheckLoopPanicFailure(t *testing.T, rt *Runtime, secret string) {
 		t.Fatal("LastFailure = nil, want panic failure")
 	}
 	message := snapshot.Status.LastFailure.Message
+	if !strings.Contains(message, want) {
+		t.Fatalf("LastFailure.Message = %q, want %q", message, want)
+	}
 	if !strings.Contains(message, ErrCheckLoopPanicked.Error()) {
 		t.Fatalf("LastFailure.Message = %q, want %q", message, ErrCheckLoopPanicked)
 	}

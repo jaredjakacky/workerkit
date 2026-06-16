@@ -36,6 +36,7 @@ type checkLoopConfig struct {
 	initialDelay            time.Duration
 	runImmediately          bool
 	timeout                 time.Duration
+	panicErr                error
 	jitter                  func(time.Duration) time.Duration
 	readyOnSuccess          bool
 	reportFailureOnNotReady bool
@@ -139,6 +140,7 @@ func WithCheckSummaryObserver(observer CheckSummaryObserver) CheckLoopOption {
 // component remains responsible for any cached dependency health state.
 func NewCheckLoop(checker opskit.Checker, opts ...CheckLoopOption) Worker {
 	cfg := newCheckLoopConfig(opts)
+	cfg.panicErr = fmt.Errorf("opskit checker panicked: %w", ErrCheckLoopPanicked)
 	return NewLoopWorker(
 		func(ctx context.Context, runtime WorkerRuntime) error {
 			return runCheckLoop(ctx, runtime, cfg, func(ctx context.Context) checkLoopOutcome {
@@ -169,6 +171,7 @@ func NewCheckLoop(checker opskit.Checker, opts ...CheckLoopOption) Worker {
 // component remains responsible for any cached dependency health state.
 func NewCheckGroupLoop(group opskit.CheckGroup, opts ...CheckLoopOption) Worker {
 	cfg := newCheckLoopConfig(opts)
+	cfg.panicErr = fmt.Errorf("opskit check group panicked: %w", ErrCheckLoopPanicked)
 	return NewLoopWorker(
 		func(ctx context.Context, runtime WorkerRuntime) error {
 			return runCheckLoop(ctx, runtime, cfg, func(ctx context.Context) checkLoopOutcome {
@@ -229,6 +232,10 @@ func runCheckLoop(ctx context.Context, runtime WorkerRuntime, cfg checkLoopConfi
 func runCheckLoopOnce(ctx context.Context, runtime WorkerRuntime, cfg checkLoopConfig, run func(context.Context) checkLoopOutcome) (err error) {
 	defer func() {
 		if recover() != nil {
+			if cfg.panicErr != nil {
+				err = cfg.panicErr
+				return
+			}
 			err = ErrCheckLoopPanicked
 		}
 	}()

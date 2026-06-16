@@ -119,6 +119,9 @@ for convenience. Composed Kit Series services should pass the application's
 shared registry so Workerkit, Configkit, Clientkit, Dependkit, and other
 components appear in one Opskit read model.
 
+Do not pre-register the Workerkit runtime in that registry when using
+`NewManaged`; `NewManaged` registers it as a required Opskit component.
+
 `Service.Server()` exposes the Servekit server so the application can register
 normal HTTP routes.
 
