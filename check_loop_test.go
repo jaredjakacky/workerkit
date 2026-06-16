@@ -3,6 +3,7 @@ package workerkit_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -255,6 +256,46 @@ func TestCheckLoopCanReportFailureOnNotReady(t *testing.T) {
 	waitForCheckWorkerState(t, rt, StateFailed)
 }
 
+func TestCheckLoopPanicMarksWorkerFailed(t *testing.T) {
+	const secret = "secret checker panic payload"
+	checker := opskit.CheckFunc(func(context.Context) opskit.CheckResult {
+		panic(secret)
+	})
+	rt := newTestRuntime(t)
+	if err := rt.Register(WorkerSpec{Name: "checks", Worker: NewCheckLoop(checker, WithCheckInterval(time.Hour))}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "checks"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = rt.Stop(context.Background(), "checks")
+	})
+
+	waitForCheckWorkerState(t, rt, StateFailed)
+	assertCheckLoopPanicFailure(t, rt, secret)
+}
+
+func TestCheckGroupLoopPanicMarksWorkerFailed(t *testing.T) {
+	const secret = "secret check group panic payload"
+	group := opskit.CheckGroupFunc(func(context.Context) opskit.CheckSummary {
+		panic(secret)
+	})
+	rt := newTestRuntime(t)
+	if err := rt.Register(WorkerSpec{Name: "checks", Worker: NewCheckGroupLoop(group, WithCheckInterval(time.Hour))}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "checks"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = rt.Stop(context.Background(), "checks")
+	})
+
+	waitForCheckWorkerState(t, rt, StateFailed)
+	assertCheckLoopPanicFailure(t, rt, secret)
+}
+
 func TestCheckLoopCanLeaveReadinessUnmanaged(t *testing.T) {
 	checker := opskit.CheckFunc(func(context.Context) opskit.CheckResult {
 		return opskit.ReadyCheck("ready", 0)
@@ -404,5 +445,24 @@ func waitForCheckWorkerState(t *testing.T, rt *Runtime, want LifecycleState) {
 		case <-deadline:
 			t.Fatalf("worker state = %s, want %s", snapshot.Status.State, want)
 		}
+	}
+}
+
+func assertCheckLoopPanicFailure(t *testing.T, rt *Runtime, secret string) {
+	t.Helper()
+
+	snapshot, ok := rt.Worker("checks")
+	if !ok {
+		t.Fatal("worker missing")
+	}
+	if snapshot.Status.LastFailure == nil {
+		t.Fatal("LastFailure = nil, want panic failure")
+	}
+	message := snapshot.Status.LastFailure.Message
+	if !strings.Contains(message, ErrCheckLoopPanicked.Error()) {
+		t.Fatalf("LastFailure.Message = %q, want %q", message, ErrCheckLoopPanicked)
+	}
+	if strings.Contains(message, secret) {
+		t.Fatalf("LastFailure.Message exposed panic payload: %q", message)
 	}
 }

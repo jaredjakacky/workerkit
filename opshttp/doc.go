@@ -26,15 +26,20 @@
 //
 // Servekit owns HTTP service construction, middleware, authentication,
 // readiness endpoints, request policy, and lifecycle. Workerkit owns runtime
-// semantics. This package adapts Workerkit readiness, status, worker
-// inspection, command discovery, command dispatch, and command errors into a
-// Servekit-native operations surface without making HTTP part of the core
+// semantics. This package adapts Workerkit-specific status, worker inspection,
+// command discovery, command dispatch, lifecycle controls, and command errors
+// into a Servekit-native operations surface without making HTTP part of the core
 // workerkit runtime.
 //
-// Use Mount to add Workerkit routes to a Servekit server, ReadinessCheck to
-// wire Workerkit readiness into Servekit, WithEndpointOptions for shared route
-// policy, WithCommandDispatchEnabled to expose command dispatch, and
-// WithAdminLifecycleControlsEnabled to expose lifecycle controls.
+// In composed Kit Series services, register Runtime with Opskit and pass that
+// registry to Servekit with servekit.WithOps(...) for /readyz and generic
+// read-only admin component routes. ReadinessCheck remains available for
+// standalone Servekit services that do not use an Opskit registry.
+//
+// Use Mount to add Workerkit-specific routes to a Servekit server,
+// WithEndpointOptions for shared route policy, WithCommandDispatchEnabled to
+// expose command dispatch, and WithAdminLifecycleControlsEnabled to expose
+// lifecycle controls.
 // WithDispatchOptions and WithLifecycleOptions apply stricter policy to those
 // mutating route groups.
 //

@@ -10,9 +10,10 @@
 // authentication, authorization, middleware, and endpoint policy required by
 // the deployment.
 //
-// NewManaged is preferred for Kubernetes and microservice services. It
-// constructs Servekit with Workerkit readiness already wired into /readyz. Use
-// New when the application already owns Servekit construction, and construct
-// that server with ReadinessOptions(runtime) or
-// servekit.WithReadinessChecks(servekitservice.ReadinessCheck(runtime)).
+// NewManaged is a convenience constructor for services that want this package
+// to construct the Servekit server. It registers Workerkit with Opskit so
+// Servekit can include Workerkit readiness in /readyz. Applications composing
+// multiple Opskit components should provide their shared registry with
+// WithOpsRegistry. Use New when the application already owns Servekit
+// construction, and construct that server with servekit.WithOps.
 package servekitservice

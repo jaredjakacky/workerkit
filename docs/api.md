@@ -517,12 +517,16 @@ Default worker options are copied into each worker when it is registered. Later 
 - `NewCheckLoop(...)`
 
   Constructs a worker that periodically executes one `opskit.Checker`.
-  Workerkit owns background execution policy; the checked component remains
+  Workerkit owns background execution policy, including timeout, cancellation,
+  panic recovery, and Workerkit failure reporting. The checked component remains
   responsible for any cached dependency health state.
 
 - `NewCheckGroupLoop(...)`
 
   Constructs a worker that periodically executes one `opskit.CheckGroup`.
+  Workerkit owns background execution policy, including timeout, cancellation,
+  panic recovery, and Workerkit failure reporting. The checked component remains
+  responsible for any cached dependency health state.
 
 - `CheckLoopOption`
 
@@ -556,7 +560,7 @@ Default worker options are copied into each worker when it is registered. Later 
 - `WithCheckReportFailureOnNotReady(...)`
 
   Controls whether not-ready check results are also reported as Workerkit worker
-  failures. Disabled by default.
+  failures and stop the check loop. Disabled by default.
 
 - `WithCheckResultObserver(...)`
 
@@ -573,6 +577,11 @@ Default worker options are copied into each worker when it is registered. Later 
 - `ErrNilCheckGroup`
 
   Reports that a check group loop was constructed without a group.
+
+- `ErrCheckLoopPanicked`
+
+  Reports that a check loop recovered a panic from an Opskit check execution
+  path.
 
 ### Name validation
 
@@ -725,7 +734,7 @@ Lifecycle controls are privileged and opt-in:
 
 - `NewManaged(...)`
 
-  Constructs a service with a Servekit server and Workerkit readiness wired into `/readyz` through Opskit. This is the preferred helper when a Workerkit runtime belongs inside a Servekit service shell and the application does not need to build its own Opskit registry.
+  Constructs a service with a Servekit server and Workerkit readiness wired into `/readyz` through Opskit. If the application has a shared Opskit registry, pass it with `WithOpsRegistry(...)`; otherwise `NewManaged` creates a private registry as a convenience.
 
 - `New(...)`
 
@@ -747,7 +756,7 @@ Lifecycle controls are privileged and opt-in:
 
 - `ReadinessOptions(...)`
 
-  Returns Servekit options that register Workerkit runtime readiness with Servekit through Opskit.
+  Returns Servekit options that register Workerkit runtime readiness with Servekit through a private Opskit registry.
 
 - `ReadinessCheck(...)`
 
@@ -757,7 +766,11 @@ Lifecycle controls are privileged and opt-in:
 
 - `WithServekitOptions(opts ...servekit.Option)`
 
-  Appends options used when `NewManaged` constructs the Servekit server. `New` rejects this option because the caller already supplied a server.
+  Appends options used when `NewManaged` constructs the Servekit server. `New` rejects this option because the caller already supplied a server. Use `WithOpsRegistry(...)` instead of passing `servekit.WithOps(...)` through this option.
+
+- `WithOpsRegistry(registry *opskit.Registry, opts ...servekit.OpsOption)`
+
+  Configures the Opskit registry `NewManaged` passes to Servekit. `NewManaged` registers the Workerkit runtime into this registry as a required component. If omitted, `NewManaged` creates a private registry for Workerkit-only readiness.
 
 - `WithOpsHTTPEnabled(enabled bool)`
 

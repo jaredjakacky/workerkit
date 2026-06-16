@@ -148,9 +148,12 @@ func WithAdminLifecycleControlsEnabled() Option {
 // inspection, and command discovery routes. Pass WithCommandDispatchEnabled to
 // mount the mutating command dispatch route. Pass
 // WithAdminLifecycleControlsEnabled to mount privileged lifecycle control
-// routes. Pass
-// ReadinessCheck(runtime) to servekit.New when the service should report
-// Workerkit readiness through Servekit's /readyz endpoint.
+// routes.
+//
+// In composed Kit Series services, register Runtime with Opskit and pass that
+// registry to Servekit with servekit.WithOps(...). ReadinessCheck remains
+// available for standalone Servekit services that do not use an Opskit
+// registry.
 func Mount(server *servekit.Server, runtime *workerkit.Runtime, opts ...Option) error {
 	if server == nil {
 		return ErrNilServer
@@ -178,6 +181,10 @@ func Mount(server *servekit.Server, runtime *workerkit.Runtime, opts ...Option) 
 
 // ReadinessCheck adapts RuntimeStatus readiness into a Servekit readiness
 // check.
+//
+// Deprecated: register Runtime with Opskit and pass the registry to Servekit
+// with servekit.WithOps instead. Use ReadinessCheck only for standalone
+// Servekit services that do not use an Opskit registry.
 func ReadinessCheck(runtime *workerkit.Runtime) servekit.ReadinessCheck {
 	return func(_ context.Context) error {
 		if runtime == nil {
