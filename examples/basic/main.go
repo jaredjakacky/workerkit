@@ -31,7 +31,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	status := runtime.Status()
+	status := runtime.RuntimeStatus()
 	fmt.Printf("runtime=%s state=%s ready=%t workers=%d\n",
 		status.Name, status.State, status.Ready, status.Workers)
 
@@ -47,7 +47,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	status = runtime.Status()
+	status = runtime.RuntimeStatus()
 	fmt.Printf("runtime=%s state=%s ready=%t workers=%d\n",
 		status.Name, status.State, status.Ready, status.Workers)
 }

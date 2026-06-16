@@ -530,11 +530,11 @@ func (r *Runtime) WaitAllIdle(ctx context.Context) error {
 // -----------------------------------------------------------------------------
 // Runtime and worker status/discovery.
 
-// Status returns a point-in-time aggregate runtime status snapshot.
+// RuntimeStatus returns a point-in-time aggregate runtime status snapshot.
 //
 // The returned status does not include per-worker detail. Use Workers or Worker
 // when callers need worker-level inspection snapshots.
-func (r *Runtime) Status() RuntimeStatus {
+func (r *Runtime) RuntimeStatus() RuntimeStatus {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 

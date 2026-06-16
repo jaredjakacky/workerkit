@@ -60,7 +60,7 @@ func main() {
 }
 
 func printStatus(runtime *workerkit.Runtime, label string) {
-	status := runtime.Status()
+	status := runtime.RuntimeStatus()
 	fmt.Printf("\n== %s ==\n", label)
 	fmt.Printf("runtime=%s state=%s ready=%t workers=%d\n",
 		status.Name, status.State, status.Ready, status.Workers)

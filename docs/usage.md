@@ -174,7 +174,7 @@ an unmanaged goroutine.
 Use `Status` for aggregate runtime status:
 
 ```go
-status := runtime.Status()
+status := runtime.RuntimeStatus()
 fmt.Println(status.State, status.Ready, status.InFlight)
 ```
 
@@ -231,7 +231,10 @@ worker has real domain operations worth exposing. Add retry and concurrency
 policy where repeated work is safe and overload needs backpressure.
 
 Use Servekit through `servekitservice.NewManaged` when Workerkit is part of an
-HTTP service. Use `opshttp` when you want an HTTP operations surface.
+HTTP service. In composed Kit Series services, register the runtime with Opskit
+and pass that registry to Servekit for `/readyz` and generic admin inspection.
+Use `opshttp` when you need Workerkit-specific HTTP command dispatch or
+privileged lifecycle controls.
 
 ## Related Guides
 

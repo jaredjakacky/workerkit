@@ -176,14 +176,14 @@ func Mount(server *servekit.Server, runtime *workerkit.Runtime, opts ...Option) 
 	return nil
 }
 
-// ReadinessCheck adapts Runtime.Status readiness into a Servekit readiness
+// ReadinessCheck adapts RuntimeStatus readiness into a Servekit readiness
 // check.
 func ReadinessCheck(runtime *workerkit.Runtime) servekit.ReadinessCheck {
 	return func(_ context.Context) error {
 		if runtime == nil {
 			return ErrNilRuntime
 		}
-		status := runtime.Status()
+		status := runtime.RuntimeStatus()
 		if !status.Ready {
 			return fmt.Errorf("worker runtime not ready: state=%s", status.State)
 		}

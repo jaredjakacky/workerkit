@@ -299,9 +299,9 @@ curl -i http://localhost:8080/admin/runtime
 lifecycle, serves the app route and readiness route, and reports 404 for ops
 HTTP.
 
-**What to notice:** `NewManaged` wires Workerkit lifecycle and readiness
-semantics into Servekit's HTTP lifecycle, `/readyz`, signal handling, and
-graceful shutdown path.
+**What to notice:** `NewManaged` wires Workerkit lifecycle into Servekit's
+service shell and exposes Workerkit readiness to `/readyz` through Opskit. It
+does not make Workerkit own HTTP serving.
 
 **Security note:** Ops HTTP is disabled by default. Enable it intentionally
 only on an appropriate operations surface.
@@ -313,8 +313,9 @@ command dispatch, lifecycle controls, or custom ops endpoint policy.
 
 ### [`examples/opshttp-basic`](../examples/opshttp-basic)
 
-**What it demonstrates:** The first Kit-series HTTP composition: Workerkit
-runtime state exposed through a Servekit-backed read-only operations plane.
+**What it demonstrates:** Standalone Workerkit-to-Servekit read-only operations
+routes through `opshttp`. In composed Kit Series services, prefer Opskit admin
+component routes for generic read-only inspection.
 
 **Run it:**
 
@@ -342,10 +343,12 @@ curl -i http://localhost:8080/readyz
 
 **Expected output:** The program prints the same curl commands at startup.
 Read-only routes return runtime status, worker inspection, and command
-discovery. `/readyz` reflects Workerkit runtime readiness through Servekit.
+discovery. `/readyz` reflects Workerkit runtime readiness through the
+standalone Servekit readiness adapter.
 
 **What to notice:** Workerkit owns runtime status and readiness semantics.
-Servekit owns HTTP routing, readiness endpoints, and endpoint policy.
+Servekit owns HTTP routing, readiness endpoints, and endpoint policy. Opskit is
+the preferred registry path when you want generic Kit Series admin routes.
 
 **Security note:** Read-only operations routes still expose operational state.
 Mount them only on an appropriate operations surface.
@@ -482,7 +485,7 @@ command dispatch, or production authz.
 
 ### [`examples/production-composition`](../examples/production-composition)
 
-**What it demonstrates:** The flagship Kit-series composition in one copyable
+**What it demonstrates:** The flagship Kit Series composition in one copyable
 service skeleton.
 
 **Run it:**
@@ -494,18 +497,16 @@ go run ./examples/production-composition
 **Architecture overview:** One Workerkit runtime contains `ingest`, `index`,
 and `maintenance` workers. Workerkit owns worker lifecycle, readiness,
 commands, retry, concurrency, failure policy, and `slog` observer events.
-Servekit owns HTTP serving, app routes, readiness endpoints, endpoint policy,
-and shutdown.
+Opskit carries the component/readiness/inspection contract. Servekit owns HTTP
+serving, app routes, readiness endpoints, endpoint policy, and shutdown.
 
 **Routes:**
 
 - `GET /app/status`
 - `GET /app/search?q=...`
 - `GET /readyz`
-- `GET /admin/runtime`
-- `GET /admin/workers`
-- `GET /admin/worker?name=...`
-- `GET /admin/commands?worker=...`
+- `GET /admin/components`
+- `GET /admin/components/catalog_service`
 - `POST /admin/commands/dispatch`
 - `POST /admin/runtime/drain`
 - privileged worker/runtime lifecycle routes
@@ -515,7 +516,8 @@ and shutdown.
 ```bash
 curl -i http://localhost:8080/app/status
 curl -i http://localhost:8080/readyz
-curl -s -H 'X-Ops-Token: dev-secret' http://localhost:8080/admin/runtime
+curl -s -H 'X-Ops-Token: dev-secret' http://localhost:8080/admin/components
+curl -s -H 'X-Ops-Token: dev-secret' http://localhost:8080/admin/components/catalog_service
 curl -i -X POST http://localhost:8080/admin/commands/dispatch \
   -H 'Content-Type: application/json' \
   -H 'X-Ops-Token: dev-secret' \
@@ -530,12 +532,18 @@ curl -i -X POST http://localhost:8080/admin/runtime/drain \
 
 **Expected output:** Workers warm up, structured logs describe runtime and
 worker events, app routes return service state, and read-only ops routes expose
-Workerkit inspection. Authorized admin operations return success responses;
-missing or wrong `X-Ops-Token` values return `401`.
+Workerkit inspection through Opskit. Authorized admin operations return success
+responses; missing or wrong `X-Ops-Token` values return `401`.
 
 **What to notice:** This is the full boundary story. Workerkit owns worker
-semantics; Servekit owns HTTP and service semantics; `opshttp` bridges them
-without making HTTP part of Workerkit core.
+semantics; Opskit owns the shared operational registry contract; Servekit owns
+HTTP and service semantics. `opshttp` is used only for Workerkit-specific
+mutating operations.
+
+In Kubernetes, these routes are pod-local. `/admin/components/catalog_service`
+shows the runtime in the pod that handled the request, and
+`/admin/runtime/drain` drains workers only in that pod unless you route directly
+to a specific replica or build a separate control plane.
 
 **Security note:** The token gate and audit middleware are placeholders.
 Production deployments must use real authentication, authorization, audit

@@ -48,7 +48,7 @@ func main() {
 	// NewManaged constructs the Servekit server for us; Server exposes it so the
 	// application can still register normal HTTP routes.
 	service.Server().Handle(http.MethodGet, "/app/status", func(r *http.Request) (any, error) {
-		status := runtime.Status()
+		status := runtime.RuntimeStatus()
 		return map[string]any{
 			"service": "managed-service",
 			"runtime": status.Name,

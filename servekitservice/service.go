@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	opskit "github.com/jaredjakacky/opskit"
 	"github.com/jaredjakacky/servekit"
 	workerkit "github.com/jaredjakacky/workerkit"
 	"github.com/jaredjakacky/workerkit/opshttp"
@@ -126,7 +127,8 @@ func defaultConfig() config {
 
 // NewManaged constructs a Workerkit service runner with a Servekit server.
 //
-// NewManaged wires Workerkit readiness into Servekit during server construction.
+// NewManaged wires Workerkit into Servekit's Opskit registry during server
+// construction.
 // It is the preferred constructor when Workerkit owns the service shell. Use
 // Service.Server to register application routes before calling Run.
 func NewManaged(runtime *workerkit.Runtime, opts ...Option) (*Service, error) {
@@ -220,15 +222,36 @@ func (s *Service) Server() *servekit.Server {
 }
 
 // ReadinessOptions returns the Servekit options needed to include Workerkit
-// runtime readiness in /readyz.
+// runtime readiness in /readyz through Opskit.
 func ReadinessOptions(runtime *workerkit.Runtime) []servekit.Option {
+	registry := opskit.NewRegistry()
+	if runtime != nil {
+		registry.MustRegister(runtime, opskit.Required())
+	}
+
 	return []servekit.Option{
-		servekit.WithReadinessChecks(ReadinessCheck(runtime)),
+		servekit.WithOps(registry),
 	}
 }
 
-// ReadinessCheck adapts Runtime.Status readiness into a Servekit readiness
+// ReadinessRegistry returns an Opskit registry with the Workerkit runtime
+// registered as one required component.
+func ReadinessRegistry(runtime *workerkit.Runtime) (*opskit.Registry, error) {
+	if runtime == nil {
+		return nil, opshttp.ErrNilRuntime
+	}
+	registry := opskit.NewRegistry()
+	if err := registry.Register(runtime, opskit.Required()); err != nil {
+		return nil, err
+	}
+	return registry, nil
+}
+
+// ReadinessCheck adapts Workerkit runtime readiness into a Servekit readiness
 // check.
+//
+// Deprecated: register Runtime with Opskit and pass the registry to Servekit
+// with servekit.WithOps instead.
 func ReadinessCheck(runtime *workerkit.Runtime) servekit.ReadinessCheck {
 	return opshttp.ReadinessCheck(runtime)
 }

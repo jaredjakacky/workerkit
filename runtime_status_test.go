@@ -41,7 +41,7 @@ func TestRuntimeStatusFailurePoliciesWithActiveWorkers(t *testing.T) {
 			t.Fatalf("ReportFailure returned error: %v", err)
 		}
 
-		status := rt.Status()
+		status := rt.RuntimeStatus()
 		if status.State != StateRunning {
 			t.Fatalf("runtime state = %s, want %s", status.State, StateRunning)
 		}
@@ -82,7 +82,7 @@ func TestRuntimeStatusFailurePoliciesWithActiveWorkers(t *testing.T) {
 			t.Fatalf("ReportFailure returned error: %v", err)
 		}
 
-		status := rt.Status()
+		status := rt.RuntimeStatus()
 		if status.State != StateFailed {
 			t.Fatalf("runtime state = %s, want %s", status.State, StateFailed)
 		}
@@ -123,7 +123,7 @@ func TestRuntimeStatusFailurePoliciesWithActiveWorkers(t *testing.T) {
 			t.Fatalf("ReportFailure returned error: %v", err)
 		}
 
-		status := rt.Status()
+		status := rt.RuntimeStatus()
 		if status.State != StateRunning {
 			t.Fatalf("runtime state = %s, want %s", status.State, StateRunning)
 		}
@@ -143,19 +143,19 @@ func TestRuntimeReadinessFallsBackWhenNoWorkersContribute(t *testing.T) {
 	); err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
-	if rt.Status().Ready {
+	if rt.RuntimeStatus().Ready {
 		t.Fatal("registered runtime ready = true, want false")
 	}
 	if err := rt.Start(context.Background(), "optional"); err != nil {
 		t.Fatalf("Start returned error: %v", err)
 	}
-	if !rt.Status().Ready {
+	if !rt.RuntimeStatus().Ready {
 		t.Fatal("running runtime ready = false, want true")
 	}
 	if err := rt.Drain(context.Background(), "optional"); err != nil {
 		t.Fatalf("Drain returned error: %v", err)
 	}
-	if rt.Status().Ready {
+	if rt.RuntimeStatus().Ready {
 		t.Fatal("draining runtime ready = true, want false")
 	}
 }
