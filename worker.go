@@ -22,6 +22,11 @@ import "context"
 // Configure Start retry only when Start is safe to call again after a failed
 // attempt.
 //
+// A lifecycle generation spans the whole Start operation, including retries.
+// Start retry does not isolate WorkerRuntime handles retained by failed
+// attempts. Before returning an error, a failed attempt must stop any goroutines
+// or callbacks that could continue using its handle.
+//
 // Stop is called when the runtime takes the worker out of service. It should
 // stop accepting worker-owned work, cancel background work, close resources, and
 // release anything acquired by Start or by worker-owned goroutines. Stop may be
@@ -90,7 +95,10 @@ type WorkerRuntime interface {
 	// ignored. Worker.Start should return setup errors directly; ReportFailure
 	// records worker health independently of the Start return path. If a current
 	// generation reports failure while Start is running, Start may still return
-	// nil while the worker finishes in StateFailed.
+	// nil while the worker finishes in StateFailed. A report accepted while Stop
+	// is running records LastFailure without interrupting the stopping transition.
+	// Reports after Stop completes or from a stale generation return
+	// ErrInvalidWorkerState without changing worker status.
 	ReportFailure(error) error
 }
 

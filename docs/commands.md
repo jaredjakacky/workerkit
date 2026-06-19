@@ -105,6 +105,12 @@ handle with `WorkerRuntimeFromContext(ctx)` and call `ReportFailure(err)`.
 Returned command errors alone are recorded as command failures; they do not
 automatically move the worker lifecycle to failed.
 
+An admitted command may call `ReportFailure` while Stop is running. Workerkit
+records that worker health failure without replacing the stopping lifecycle. A
+command calling through the same handle after Stop completes, or after the
+worker restarts into a new generation, receives `ErrInvalidWorkerState` and
+cannot mutate the stopped or restarted worker.
+
 Command panics are also recorded in `LastCommandFailure` and emit a panic
 failure event. A panic from the current worker generation moves a running or
 draining worker to `failed`.
@@ -115,6 +121,8 @@ begun or completed, Workerkit preserves the stopping/stopped lifecycle, updates
 `LastCommandFailure`, and emits the failure event. Successful completion only
 releases the in-flight slot. A command retained from an older generation cannot
 mutate the restarted worker's status, though its failure event is still emitted.
+Until that handler exits, it continues to count toward the restarted worker's
+and runtime's `InFlight`, concurrency limits, and idle waits.
 
 ## Admission and Saturation
 
