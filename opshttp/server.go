@@ -107,9 +107,10 @@ func WithLifecycleOptions(opts ...servekit.EndpointOption) Option {
 // Lifecycle mutations are detached from HTTP client disconnect cancellation so
 // a dropped connection does not necessarily abort Start, Drain, or Stop. This
 // timeout adds a deadline to the context passed to the lifecycle operation. The
-// deadline is cooperative: Workerkit cannot interrupt worker code that ignores
-// ctx.Done(). A zero timeout keeps the default, and a negative timeout
-// explicitly disables the opshttp lifecycle timeout.
+// deadline includes time waiting for another lifecycle operation and is
+// cooperative once worker code is running: Workerkit cannot interrupt worker
+// code that ignores ctx.Done(). A zero timeout keeps the default, and a
+// negative timeout explicitly disables the opshttp lifecycle timeout.
 func WithLifecycleTimeout(timeout time.Duration) Option {
 	return func(cfg *config) {
 		if timeout == 0 {

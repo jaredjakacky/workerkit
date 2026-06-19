@@ -18,7 +18,11 @@ type workerLifecycleRequest struct {
 // Runtime drain uses Runtime.DrainAll semantics: it drains workers
 // sequentially and is not an atomic runtime-wide command admission cutoff.
 // Runtime start uses Runtime.StartAll semantics: it is fail-fast and does not
-// roll back workers already started by the same request.
+// roll back workers already started by the same request. Concurrent lifecycle
+// requests are serialized by Runtime, and time waiting for the active operation
+// counts against the lifecycle request timeout. Stop routes use immediate
+// Runtime.Stop and Runtime.StopAll semantics: they do not wait for or cancel
+// commands that were already admitted.
 func registerLifecycleRoutes(server *servekit.Server, runtime *workerkit.Runtime, cfg config) {
 	opts := lifecycleEndpointOptions(cfg)
 

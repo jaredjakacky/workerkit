@@ -105,6 +105,17 @@ handle with `WorkerRuntimeFromContext(ctx)` and call `ReportFailure(err)`.
 Returned command errors alone are recorded as command failures; they do not
 automatically move the worker lifecycle to failed.
 
+Command panics are also recorded in `LastCommandFailure` and emit a panic
+failure event. A panic from the current worker generation moves a running or
+draining worker to `failed`.
+
+Stop closes command admission but does not wait for admitted commands or cancel
+their contexts. If an admitted command returns an error or panics after Stop has
+begun or completed, Workerkit preserves the stopping/stopped lifecycle, updates
+`LastCommandFailure`, and emits the failure event. Successful completion only
+releases the in-flight slot. A command retained from an older generation cannot
+mutate the restarted worker's status, though its failure event is still emitted.
+
 ## Admission and Saturation
 
 Dispatch must pass runtime and worker checks:

@@ -16,6 +16,11 @@ import (
 // avoid blocking work. StartCommand may return a derived context that Workerkit
 // passes to the command handler.
 //
+// Lifecycle observations run inside the runtime's serialized lifecycle
+// operation. Observer callbacks must not call public Runtime lifecycle methods
+// recursively. Status reads and worker-scoped WorkerRuntime operations remain
+// safe from callbacks.
+//
 // The Observer method set is intended to stay stable within a major version.
 // New telemetry details should generally be added as fields on existing event
 // structs instead of as new Observer methods, because adding interface methods

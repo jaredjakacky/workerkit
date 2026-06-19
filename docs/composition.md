@@ -203,6 +203,10 @@ These routes mutate runtime state. Do not expose them publicly. Protect them
 with authentication, authorization, request limits, route-specific timeouts,
 and audit logging. These are pod-local controls, not Deployment-wide controls.
 
+The stop routes do not wait for or cancel commands already in flight. For a
+graceful HTTP sequence, drain, poll the worker or runtime status until
+`inFlight` is zero, then stop.
+
 ## Endpoint Policy
 
 Servekit endpoint options belong at the HTTP boundary:

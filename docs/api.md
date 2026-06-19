@@ -108,7 +108,7 @@ Everything else in this file exists to customize that path without turning worke
 
 - `Stop(...)`
 
-  Stops one running, draining, or failed worker. Stop does not wait for in-flight commands; compose `Drain`, `WaitIdle`, and `Stop` when graceful command drain is required.
+  Stops one running, draining, or failed worker. Stop closes command admission but does not wait for in-flight commands or cancel their contexts; compose `Drain`, `WaitIdle`, and `Stop` when graceful command drain is required.
 
 - `StopAll(...)`
 

@@ -101,6 +101,11 @@ The common lifecycle methods are:
 - `StopAll` stops workers in reverse registration order.
 - `Shutdown` drains all workers best-effort, waits for runtime idle, then stops.
 
+Lifecycle mutations are serialized per runtime. Concurrent calls wait for the
+active lifecycle operation, and that wait counts against their context
+deadline. Command dispatch and status reads remain concurrent with lifecycle
+operations and are gated by current runtime state.
+
 For the full lifecycle model, read [`lifecycle.md`](lifecycle.md).
 
 ## Readiness

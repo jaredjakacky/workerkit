@@ -24,6 +24,11 @@ The observer receives events for:
 Workerkit wraps observers defensively so observer failures do not take down the
 runtime.
 
+Observer callbacks are synchronous. Lifecycle observations run inside the
+runtime's serialized lifecycle operation, so callbacks must not recursively
+call public `Runtime` lifecycle methods. Status reads and worker-scoped
+`WorkerRuntime` operations remain available.
+
 ## Events
 
 `TransitionEvent` describes worker lifecycle transitions.

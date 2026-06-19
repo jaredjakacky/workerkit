@@ -56,8 +56,14 @@ func (m Identity) Validate() error {
 
 // Runtime manages worker registration, lifecycle control, worker-owned
 // commands, and operational state for one workerkit service boundary.
+//
+// Registration and lifecycle mutations are serialized. Command dispatch,
+// status reads, and WorkerRuntime operations remain concurrent and are gated by
+// current operational state.
 type Runtime struct {
 	mu sync.RWMutex
+
+	lifecycleGate chan struct{}
 
 	identity Identity
 	config   runtimeConfig
@@ -93,7 +99,7 @@ func New(identity Identity, opts ...RuntimeOption) (*Runtime, error) {
 		return nil, err
 	}
 
-	return &Runtime{
+	runtime := &Runtime{
 		identity:      identity,
 		config:        cfg,
 		registrations: make(map[string]WorkerSpec),
@@ -105,7 +111,10 @@ func New(identity Identity, opts ...RuntimeOption) (*Runtime, error) {
 			Name:  identity.Name,
 			State: StateRegistered,
 		},
-	}, nil
+		lifecycleGate: make(chan struct{}, 1),
+	}
+	runtime.lifecycleGate <- struct{}{}
+	return runtime, nil
 }
 
 // Register adds a worker to the runtime in the registered lifecycle state.
@@ -121,6 +130,11 @@ func (r *Runtime) Register(reg WorkerSpec, opts ...WorkerOption) error {
 	if err := validateIdentifier(reg.Name, "worker registration name"); err != nil {
 		return err
 	}
+	releaseLifecycle, err := r.acquireLifecycle(context.Background())
+	if err != nil {
+		return err
+	}
+	defer releaseLifecycle()
 
 	qualifiedName := qualifyWorkerName(r.identity.Name, reg.Name)
 
@@ -189,10 +203,13 @@ func (r *Runtime) Register(reg WorkerSpec, opts ...WorkerOption) error {
 // interrupt a blocked handler.
 //
 // Returned handler errors are command failures: they update LastCommandFailure
-// and emit FailureEvent, but do not move the worker to StateFailed. Command
-// panics are recovered outside the retry loop, are not retried, and currently
-// fail the worker according to PanicPolicy. Worker code that decides a command
-// failure means the worker is unhealthy should call
+// and emit FailureEvent, but do not move the worker to StateFailed. This remains
+// true when an admitted command completes after Stop. Command panics are
+// recovered outside the retry loop and are not retried. A panic from the current
+// generation fails a running or draining worker according to PanicPolicy. Panics
+// completing after Stop preserve lifecycle and are recorded as command
+// failures. Worker code that decides a returned command failure means the worker
+// is unhealthy should call
 // WorkerRuntime.ReportFailure(err).
 //
 // Dispatch only invokes commands registered through worker registration options.
@@ -217,14 +234,15 @@ func (r *Runtime) Dispatch(ctx context.Context, req CommandRequest) (res Command
 		return CommandResult{}, err
 	}
 
-	if err := r.admitCommand(req.Worker); err != nil {
+	generation, err := r.admitCommand(req.Worker)
+	if err != nil {
 		return CommandResult{}, err
 	}
 	defer r.releaseCommandSlot(req.Worker)
 
-	defer r.recoverCommandPanic(ctx, req, cfg, dispatchID, &attempts, &res, &err)
+	defer r.recoverCommandPanic(ctx, req, cfg, generation, dispatchID, &attempts, &res, &err)
 
-	res, err = r.executeCommand(ctx, req, reg, cfg, dispatchID, &attempts)
+	res, err = r.executeCommand(ctx, req, reg, cfg, generation, dispatchID, &attempts)
 	if err != nil {
 		return CommandResult{}, err
 	}
@@ -234,6 +252,36 @@ func (r *Runtime) Dispatch(ctx context.Context, req CommandRequest) (res Command
 
 // -----------------------------------------------------------------------------
 // Worker lifecycle.
+
+func (r *Runtime) acquireLifecycle(ctx context.Context) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-r.lifecycleGate:
+		if err := ctx.Err(); err != nil {
+			r.lifecycleGate <- struct{}{}
+			return nil, err
+		}
+		return func() {
+			r.lifecycleGate <- struct{}{}
+		}, nil
+	}
+}
+
+func (r *Runtime) runLifecycle(ctx context.Context, operation func() error) error {
+	release, err := r.acquireLifecycle(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return operation()
+}
 
 // Start brings one registered worker into service.
 //
@@ -247,16 +295,25 @@ func (r *Runtime) Dispatch(ctx context.Context, req CommandRequest) (res Command
 // If Worker.Start fails after partial setup, Workerkit records the failure but
 // does not call Worker.Stop from inside Start.
 //
+// Start returning nil means Worker.Start completed successfully. An asynchronous
+// ReportFailure may still move the worker to StateFailed before Start returns;
+// callers should use worker status and readiness to observe worker health.
+//
 // If the worker sets readiness or accepting-work state during Worker.Start,
 // those choices are preserved. Otherwise the worker receives its configured
 // ready-on-start and accepting-work-on-start defaults.
-func (r *Runtime) Start(ctx context.Context, name string) (err error) {
+func (r *Runtime) Start(ctx context.Context, name string) error {
+	return r.runLifecycle(ctx, func() error { return r.start(ctx, name) })
+}
+
+func (r *Runtime) start(ctx context.Context, name string) (err error) {
 	name, worker, cfg, err := r.lookupWorker(name)
 	if err != nil {
 		return err
 	}
 
-	if err := r.beginWorkerStart(ctx, name); err != nil {
+	generation, err := r.beginWorkerStart(ctx, name)
+	if err != nil {
 		return err
 	}
 	defer func() {
@@ -265,7 +322,7 @@ func (r *Runtime) Start(ctx context.Context, name string) (err error) {
 				fmt.Sprintf("starting worker %q", name),
 				recovered,
 			)
-			r.failWorker(ctx, name, "", panicErr, true)
+			r.failWorker(ctx, name, generation, panicErr, true)
 			if cfg.panicPolicy == PanicPolicyCrash {
 				panic(recovered)
 			}
@@ -274,17 +331,17 @@ func (r *Runtime) Start(ctx context.Context, name string) (err error) {
 	}()
 
 	err = runWithRetry(ctx, cfg.startTimeout, cfg.startRetryPolicy, func(attemptCtx context.Context, _ int) error {
-		attemptCtx = withWorkerRuntime(attemptCtx, r.workerRuntimeHandle(attemptCtx, name))
+		attemptCtx = withWorkerRuntime(attemptCtx, r.workerRuntimeHandle(attemptCtx, name, generation))
 		return worker.Start(attemptCtx)
 	}, func(opErr error, _ int) {
-		r.recordWorkerFailureStatus(name, opErr)
+		r.recordWorkerFailureStatus(name, generation, opErr)
 	})
 	if err != nil {
-		r.failWorker(ctx, name, "", err, false)
+		r.failWorker(ctx, name, generation, err, false)
 		return err
 	}
 
-	return r.completeWorkerStart(ctx, name, cfg.readyOnStart, cfg.acceptingWork)
+	return r.completeWorkerStart(ctx, name, generation, cfg.readyOnStart, cfg.acceptingWork)
 }
 
 // Stop takes one running, draining, or failed worker out of service.
@@ -297,17 +354,26 @@ func (r *Runtime) Start(ctx context.Context, name string) (err error) {
 //
 // The stop timeout is a cooperative context deadline. Worker.Stop must observe
 // ctx.Done() and return. Workerkit cannot force resource cleanup if Stop blocks.
+// A timed-out LoopWorker stop remains active internally; retry Stop to join the
+// same loop and finish cleanup before restarting it.
 //
-// Stop does not wait for in-flight commands to drain. Use Drain when the worker
-// should stop accepting new work before a later Stop call. A successful stop
-// preserves prior LastFailure evidence for operator inspection.
-func (r *Runtime) Stop(ctx context.Context, name string) (err error) {
+// Stop does not wait for in-flight commands or cancel their contexts. A stopped
+// worker may therefore temporarily report a positive InFlight count. Worker.Stop
+// must not release resources still needed by admitted commands unless the caller
+// first composes Drain, WaitIdle, and Stop. A successful stop preserves prior
+// LastFailure evidence for operator inspection.
+func (r *Runtime) Stop(ctx context.Context, name string) error {
+	return r.runLifecycle(ctx, func() error { return r.stop(ctx, name) })
+}
+
+func (r *Runtime) stop(ctx context.Context, name string) (err error) {
 	name, worker, cfg, err := r.lookupWorker(name)
 	if err != nil {
 		return err
 	}
 
-	if err := r.beginWorkerStop(ctx, name); err != nil {
+	generation, err := r.beginWorkerStop(ctx, name)
+	if err != nil {
 		return err
 	}
 	defer func() {
@@ -316,7 +382,7 @@ func (r *Runtime) Stop(ctx context.Context, name string) (err error) {
 				fmt.Sprintf("stopping worker %q", name),
 				recovered,
 			)
-			r.failWorker(ctx, name, "", panicErr, true)
+			r.failWorker(ctx, name, generation, panicErr, true)
 			if cfg.panicPolicy == PanicPolicyCrash {
 				panic(recovered)
 			}
@@ -326,17 +392,16 @@ func (r *Runtime) Stop(ctx context.Context, name string) (err error) {
 
 	attemptCtx, cancel := withTimeout(ctx, cfg.stopTimeout)
 	defer cancel()
-	attemptCtx = withWorkerRuntime(attemptCtx, r.workerRuntimeHandle(attemptCtx, name))
+	attemptCtx = withWorkerRuntime(attemptCtx, r.workerRuntimeHandle(attemptCtx, name, generation))
 
 	err = worker.Stop(attemptCtx)
 	if err != nil {
-		r.recordWorkerFailureStatus(name, err)
-		r.failWorker(ctx, name, "", err, false)
+		r.recordWorkerFailureStatus(name, generation, err)
+		r.failWorker(ctx, name, generation, err, false)
 		return err
 	}
 
-	r.completeWorkerTransition(ctx, name, StateStopped, false, false)
-	return nil
+	return r.completeWorkerTransition(ctx, name, generation, StateStopping, StateStopped, false, false)
 }
 
 // Drain marks one running worker as draining.
@@ -346,6 +411,10 @@ func (r *Runtime) Stop(ctx context.Context, name string) (err error) {
 // worker's domain-specific business loop. Calling Drain on an already-draining
 // worker is allowed.
 func (r *Runtime) Drain(ctx context.Context, name string) error {
+	return r.runLifecycle(ctx, func() error { return r.drain(ctx, name) })
+}
+
+func (r *Runtime) drain(ctx context.Context, name string) error {
 	name, err := r.resolveWorkerNameStrict(name)
 	if err != nil {
 		return fmt.Errorf("invalid worker name: %w", err)
@@ -358,6 +427,8 @@ func (r *Runtime) Drain(ctx context.Context, name string) error {
 // StartAll is a convenience for service bootstrap. It starts registered,
 // stopped, and failed workers, skips workers that are already running, and is
 // fail-fast for workers in transitional states or workers that fail to start.
+// An asynchronous ReportFailure during Worker.Start does not make StartAll
+// return an error, but the affected worker finishes startup in StateFailed.
 //
 // StartAll does not roll back partial startup. If a later worker fails to
 // start, workers already started by this call remain running. Callers that need
@@ -368,10 +439,14 @@ func (r *Runtime) Drain(ctx context.Context, name string) error {
 // Call Start directly when the application needs custom ordering or error
 // handling.
 func (r *Runtime) StartAll(ctx context.Context) error {
+	return r.runLifecycle(ctx, func() error { return r.startAll(ctx) })
+}
+
+func (r *Runtime) startAll(ctx context.Context) error {
 	for _, worker := range r.registeredWorkerLifecycles() {
 		switch worker.state {
 		case StateRegistered, StateStopped, StateFailed:
-			if err := r.Start(ctx, worker.name); err != nil {
+			if err := r.start(ctx, worker.name); err != nil {
 				return err
 			}
 		case StateRunning:
@@ -393,10 +468,14 @@ func (r *Runtime) StartAll(ctx context.Context) error {
 // runtime-wide command admission cutoff: workers later in registration order may
 // still accept Workerkit command dispatches until their own drain step runs.
 func (r *Runtime) DrainAll(ctx context.Context) error {
+	return r.runLifecycle(ctx, func() error { return r.drainAll(ctx) })
+}
+
+func (r *Runtime) drainAll(ctx context.Context) error {
 	for _, worker := range r.registeredWorkerLifecycles() {
 		switch worker.state {
 		case StateRunning:
-			if err := r.Drain(ctx, worker.name); err != nil {
+			if err := r.drain(ctx, worker.name); err != nil {
 				return err
 			}
 		case StateDraining, StateRegistered, StateStopped, StateFailed:
@@ -420,11 +499,15 @@ func (r *Runtime) DrainAll(ctx context.Context) error {
 // order may still accept Workerkit command dispatches until their own drain step
 // runs.
 func (r *Runtime) DrainAllBestEffort(ctx context.Context) error {
+	return r.runLifecycle(ctx, func() error { return r.drainAllBestEffort(ctx) })
+}
+
+func (r *Runtime) drainAllBestEffort(ctx context.Context) error {
 	var errs []error
 	for _, worker := range r.registeredWorkerLifecycles() {
 		switch worker.state {
 		case StateRunning:
-			if err := r.Drain(ctx, worker.name); err != nil {
+			if err := r.drain(ctx, worker.name); err != nil {
 				errs = append(errs, err)
 			}
 		case StateDraining, StateRegistered, StateStopped, StateFailed:
@@ -442,13 +525,17 @@ func (r *Runtime) DrainAllBestEffort(ctx context.Context) error {
 // already inactive, and continues after individual stop failures. If any worker
 // fails to stop, StopAll returns the combined error.
 func (r *Runtime) StopAll(ctx context.Context) error {
+	return r.runLifecycle(ctx, func() error { return r.stopAll(ctx) })
+}
+
+func (r *Runtime) stopAll(ctx context.Context) error {
 	workers := r.registeredWorkerLifecycles()
 	var errs []error
 	for i := len(workers) - 1; i >= 0; i-- {
 		worker := workers[i]
 		switch worker.state {
 		case StateRunning, StateDraining, StateFailed:
-			if err := r.Stop(ctx, worker.name); err != nil {
+			if err := r.stop(ctx, worker.name); err != nil {
 				errs = append(errs, err)
 			}
 		case StateRegistered, StateStopped, StateStopping:
@@ -467,8 +554,12 @@ func (r *Runtime) StopAll(ctx context.Context) error {
 // the caller's context directly for the entire sequence. Callers that need a
 // shutdown budget should pass a context with a deadline.
 func (r *Runtime) Shutdown(ctx context.Context) error {
+	return r.runLifecycle(ctx, func() error { return r.shutdown(ctx) })
+}
+
+func (r *Runtime) shutdown(ctx context.Context) error {
 	var errs []error
-	if err := r.DrainAllBestEffort(ctx); err != nil {
+	if err := r.drainAllBestEffort(ctx); err != nil {
 		errs = append(errs, err)
 	}
 	if err := ctx.Err(); err != nil {
@@ -482,7 +573,7 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 		errs = append(errs, err)
 		return errors.Join(errs...)
 	}
-	if err := r.StopAll(ctx); err != nil {
+	if err := r.stopAll(ctx); err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
@@ -732,11 +823,12 @@ func (r *Runtime) resolveWorkerNameStrict(name string) (string, error) {
 	return resolveWorkerName(r.identity.Name, name)
 }
 
-func (r *Runtime) workerRuntimeHandle(ctx context.Context, name string) WorkerRuntime {
+func (r *Runtime) workerRuntimeHandle(ctx context.Context, name string, generation uint64) WorkerRuntime {
 	return &workerControlHandle{
-		runtime: r,
-		name:    name,
-		ctx:     observerContext(ctx),
+		runtime:    r,
+		name:       name,
+		generation: generation,
+		ctx:        observerContext(ctx),
 	}
 }
 
@@ -786,23 +878,24 @@ func (r *Runtime) observeWorkerStateChange(ctx context.Context, obs workerStateO
 	r.observeRuntimeChanges(ctx, obs.before, obs.after)
 }
 
-func (r *Runtime) beginWorkerStart(ctx context.Context, name string) error {
+func (r *Runtime) beginWorkerStart(ctx context.Context, name string) (uint64, error) {
 	r.mu.Lock()
 
 	state, ok := r.workerStates[name]
 	if !ok {
 		r.mu.Unlock()
-		return fmt.Errorf("%w: %s", ErrWorkerNotFound, name)
+		return 0, fmt.Errorf("%w: %s", ErrWorkerNotFound, name)
 	}
 	switch state.lifecycle {
 	case StateRegistered, StateStopped, StateFailed:
 	default:
 		r.mu.Unlock()
-		return fmt.Errorf("%w: cannot start worker %q in state %q", ErrInvalidWorkerState, name, state.lifecycle)
+		return 0, fmt.Errorf("%w: cannot start worker %q in state %q", ErrInvalidWorkerState, name, state.lifecycle)
 	}
 
 	before := state
 	now := time.Now()
+	state.generation++
 	state.lastTransition = &LifecycleTransition{
 		From: state.lifecycle,
 		To:   StateStarting,
@@ -813,26 +906,27 @@ func (r *Runtime) beginWorkerStart(ctx context.Context, name string) error {
 	state.acceptingWork = false
 	state.readySetDuringStart = false
 	state.acceptingWorkSetDuringStart = false
+	state.failureReportedDuringStart = false
 	obs := r.commitWorkerStateLocked(name, before, state, now)
 	r.mu.Unlock()
 
 	r.observeWorkerStateChange(ctx, obs)
-	return nil
+	return state.generation, nil
 }
 
-func (r *Runtime) beginWorkerStop(ctx context.Context, name string) error {
+func (r *Runtime) beginWorkerStop(ctx context.Context, name string) (uint64, error) {
 	r.mu.Lock()
 
 	state, ok := r.workerStates[name]
 	if !ok {
 		r.mu.Unlock()
-		return fmt.Errorf("%w: %s", ErrWorkerNotFound, name)
+		return 0, fmt.Errorf("%w: %s", ErrWorkerNotFound, name)
 	}
 	switch state.lifecycle {
 	case StateRunning, StateDraining, StateFailed:
 	default:
 		r.mu.Unlock()
-		return fmt.Errorf("%w: cannot stop worker %q in state %q", ErrInvalidWorkerState, name, state.lifecycle)
+		return 0, fmt.Errorf("%w: cannot stop worker %q in state %q", ErrInvalidWorkerState, name, state.lifecycle)
 	}
 
 	before := state
@@ -851,16 +945,20 @@ func (r *Runtime) beginWorkerStop(ctx context.Context, name string) error {
 	r.mu.Unlock()
 
 	r.observeWorkerStateChange(ctx, obs)
-	return nil
+	return state.generation, nil
 }
 
-func (r *Runtime) setWorkerReady(ctx context.Context, name string, ready bool) error {
+func (r *Runtime) setWorkerReady(ctx context.Context, name string, generation uint64, ready bool) error {
 	r.mu.Lock()
 
 	state, ok := r.workerStates[name]
 	if !ok {
 		r.mu.Unlock()
 		return fmt.Errorf("%w: %s", ErrWorkerNotFound, name)
+	}
+	if state.generation != generation {
+		r.mu.Unlock()
+		return staleWorkerGenerationError(name, generation, state.generation)
 	}
 	if !lifecycleAllowsWorkerRuntimeMutation(state.lifecycle) {
 		r.mu.Unlock()
@@ -884,13 +982,17 @@ func (r *Runtime) setWorkerReady(ctx context.Context, name string, ready bool) e
 	return nil
 }
 
-func (r *Runtime) setWorkerAcceptingWork(name string, accepting bool) error {
+func (r *Runtime) setWorkerAcceptingWork(name string, generation uint64, accepting bool) error {
 	r.mu.Lock()
 
 	state, ok := r.workerStates[name]
 	if !ok {
 		r.mu.Unlock()
 		return fmt.Errorf("%w: %s", ErrWorkerNotFound, name)
+	}
+	if state.generation != generation {
+		r.mu.Unlock()
+		return staleWorkerGenerationError(name, generation, state.generation)
 	}
 	if !lifecycleAllowsWorkerRuntimeMutation(state.lifecycle) {
 		r.mu.Unlock()
@@ -954,10 +1056,18 @@ func (r *Runtime) beginWorkerDrain(ctx context.Context, name string) error {
 	return nil
 }
 
-func (r *Runtime) completeWorkerTransition(ctx context.Context, name string, to LifecycleState, ready bool, acceptingWork bool) {
+func (r *Runtime) completeWorkerTransition(ctx context.Context, name string, generation uint64, from LifecycleState, to LifecycleState, ready bool, acceptingWork bool) error {
 	r.mu.Lock()
 
 	state := r.workerStates[name]
+	if state.generation != generation {
+		r.mu.Unlock()
+		return staleWorkerGenerationError(name, generation, state.generation)
+	}
+	if state.lifecycle != from {
+		r.mu.Unlock()
+		return completeWorkerTransitionStateError(name, from, state)
+	}
 	before := state
 	now := time.Now()
 	state.lastTransition = &LifecycleTransition{
@@ -974,18 +1084,41 @@ func (r *Runtime) completeWorkerTransition(ctx context.Context, name string, to 
 	r.mu.Unlock()
 
 	r.observeWorkerStateChange(ctx, obs)
+	return nil
 }
 
-func (r *Runtime) completeWorkerStart(ctx context.Context, name string, defaultReady bool, defaultAcceptingWork bool) error {
+func (r *Runtime) completeWorkerStart(ctx context.Context, name string, generation uint64, defaultReady bool, defaultAcceptingWork bool) error {
 	r.mu.Lock()
 
 	state := r.workerStates[name]
+	if state.generation != generation {
+		r.mu.Unlock()
+		return staleWorkerGenerationError(name, generation, state.generation)
+	}
 	if state.lifecycle != StateStarting {
 		r.mu.Unlock()
 		return completeWorkerStartStateError(name, state)
 	}
 	before := state
 	now := time.Now()
+	if state.failureReportedDuringStart {
+		state.lastTransition = &LifecycleTransition{
+			From: state.lifecycle,
+			To:   StateFailed,
+			At:   now,
+		}
+		state.lifecycle = StateFailed
+		state.ready = false
+		state.acceptingWork = false
+		state.readySetDuringStart = false
+		state.acceptingWorkSetDuringStart = false
+		state.failureReportedDuringStart = false
+		obs := r.commitWorkerStateLocked(name, before, state, now)
+		r.mu.Unlock()
+
+		r.observeWorkerStateChange(ctx, obs)
+		return nil
+	}
 	state.lastTransition = &LifecycleTransition{
 		From: state.lifecycle,
 		To:   StateRunning,
@@ -1000,12 +1133,33 @@ func (r *Runtime) completeWorkerStart(ctx context.Context, name string, defaultR
 	}
 	state.readySetDuringStart = false
 	state.acceptingWorkSetDuringStart = false
+	state.failureReportedDuringStart = false
 	state.lastFailure = nil
 	obs := r.commitWorkerStateLocked(name, before, state, now)
 	r.mu.Unlock()
 
 	r.observeWorkerStateChange(ctx, obs)
 	return nil
+}
+
+func completeWorkerTransitionStateError(name string, want LifecycleState, state workerState) error {
+	return fmt.Errorf(
+		"%w: cannot complete worker %q transition from %q while in state %q",
+		ErrInvalidWorkerState,
+		name,
+		want,
+		state.lifecycle,
+	)
+}
+
+func staleWorkerGenerationError(name string, got, current uint64) error {
+	return fmt.Errorf(
+		"%w: stale runtime handle for worker %q: generation=%d current=%d",
+		ErrInvalidWorkerState,
+		name,
+		got,
+		current,
+	)
 }
 
 func completeWorkerStartStateError(name string, state workerState) error {
@@ -1021,17 +1175,18 @@ func completeWorkerStartStateError(name string, state workerState) error {
 	)
 }
 
-func (r *Runtime) failWorker(ctx context.Context, name, command string, err error, panicked bool) {
-	r.failWorkerWithCommandAttempt(ctx, name, command, err, panicked, "", 0)
-}
-
-func (r *Runtime) failWorkerWithCommandAttempt(ctx context.Context, name, command string, err error, panicked bool, dispatchID string, attempt int) {
+func (r *Runtime) failWorker(ctx context.Context, name string, generation uint64, err error, panicked bool) {
 	r.mu.Lock()
 
 	state := r.workerStates[name]
-	before := state
-	suppressFailureEvent := command == "" && before.lifecycle == StateFailed && before.lastFailure != nil
 	now := time.Now()
+	if state.generation != generation {
+		r.mu.Unlock()
+		return
+	}
+	before := state
+	suppressFailureEvent := before.lastFailure != nil &&
+		(before.lifecycle == StateFailed || before.failureReportedDuringStart)
 	state.lastTransition = &LifecycleTransition{
 		From: state.lifecycle,
 		To:   StateFailed,
@@ -1042,6 +1197,7 @@ func (r *Runtime) failWorkerWithCommandAttempt(ctx context.Context, name, comman
 	state.acceptingWork = false
 	state.readySetDuringStart = false
 	state.acceptingWorkSetDuringStart = false
+	state.failureReportedDuringStart = false
 	state.lastFailure = &FailureInfo{
 		Message: err.Error(),
 		At:      now,
@@ -1054,12 +1210,12 @@ func (r *Runtime) failWorkerWithCommandAttempt(ctx context.Context, name, comman
 	}
 	r.observeReadinessChange(ctx, obs.worker, obs.beforeReady, obs.afterReady, obs.at)
 	if !suppressFailureEvent {
-		r.observeFailure(ctx, name, command, err, panicked, now, dispatchID, attempt)
+		r.observeFailure(ctx, name, "", err, panicked, now, "", 0)
 	}
 	r.observeRuntimeChanges(ctx, obs.before, obs.after)
 }
 
-func (r *Runtime) reportWorkerFailure(ctx context.Context, name string, err error) error {
+func (r *Runtime) reportWorkerFailure(ctx context.Context, name string, generation uint64, err error) error {
 	if err == nil {
 		return nil
 	}
@@ -1071,8 +1227,12 @@ func (r *Runtime) reportWorkerFailure(ctx context.Context, name string, err erro
 		r.mu.Unlock()
 		return fmt.Errorf("%w: %s", ErrWorkerNotFound, name)
 	}
+	if state.generation != generation {
+		r.mu.Unlock()
+		return staleWorkerGenerationError(name, generation, state.generation)
+	}
 	switch state.lifecycle {
-	case StateStarting, StateRunning, StateDraining:
+	case StateStarting, StateRunning, StateDraining, StateStopping:
 	default:
 		r.mu.Unlock()
 		return fmt.Errorf("%w: cannot report failure for worker %q in state %q", ErrInvalidWorkerState, name, state.lifecycle)
@@ -1080,6 +1240,24 @@ func (r *Runtime) reportWorkerFailure(ctx context.Context, name string, err erro
 
 	before := state
 	now := time.Now()
+	if state.lifecycle == StateStarting || state.lifecycle == StateStopping {
+		state.ready = false
+		state.acceptingWork = false
+		state.readySetDuringStart = false
+		state.acceptingWorkSetDuringStart = false
+		state.failureReportedDuringStart = state.lifecycle == StateStarting
+		state.lastFailure = &FailureInfo{
+			Message: err.Error(),
+			At:      now,
+		}
+		obs := r.commitWorkerStateLocked(name, before, state, now)
+		r.mu.Unlock()
+
+		r.observeReadinessChange(ctx, obs.worker, obs.beforeReady, obs.afterReady, obs.at)
+		r.observeFailure(ctx, name, "", err, false, now, "", 0)
+		r.observeRuntimeChanges(ctx, obs.before, obs.after)
+		return nil
+	}
 	state.lastTransition = &LifecycleTransition{
 		From: state.lifecycle,
 		To:   StateFailed,
@@ -1090,6 +1268,7 @@ func (r *Runtime) reportWorkerFailure(ctx context.Context, name string, err erro
 	state.acceptingWork = false
 	state.readySetDuringStart = false
 	state.acceptingWorkSetDuringStart = false
+	state.failureReportedDuringStart = false
 	state.lastFailure = &FailureInfo{
 		Message: err.Error(),
 		At:      now,
@@ -1109,10 +1288,14 @@ func (r *Runtime) reportWorkerFailure(ctx context.Context, name string, err erro
 // recordWorkerFailureStatus records worker failure status without changing
 // worker lifecycle or emitting an observer event. Lifecycle retry attempts use
 // this path so only terminal lifecycle failure increments failure observations.
-func (r *Runtime) recordWorkerFailureStatus(name string, err error) {
+func (r *Runtime) recordWorkerFailureStatus(name string, generation uint64, err error) {
 	r.mu.Lock()
 
 	state := r.workerStates[name]
+	if state.generation != generation {
+		r.mu.Unlock()
+		return
+	}
 	now := time.Now()
 	state.lastFailure = &FailureInfo{
 		Message: err.Error(),
@@ -1126,20 +1309,73 @@ func (r *Runtime) recordWorkerFailureStatus(name string, err error) {
 // lifecycle or worker health failure status. Command handler returned errors
 // use this path because domain command failures are not automatically worker
 // health failures.
-func (r *Runtime) recordCommandFailure(ctx context.Context, name, command string, err error, dispatchID string, attempt int) {
+func (r *Runtime) recordCommandFailure(ctx context.Context, name string, generation uint64, command string, err error, dispatchID string, attempt int) {
 	r.mu.Lock()
 
 	state := r.workerStates[name]
 	now := time.Now()
-	state.lastCommandFailure = &CommandFailureInfo{
-		Command: command,
-		Message: err.Error(),
-		At:      now,
+	if state.generation == generation {
+		state.lastCommandFailure = &CommandFailureInfo{
+			Command: command,
+			Message: err.Error(),
+			At:      now,
+		}
+		r.workerStates[name] = state
 	}
-	r.workerStates[name] = state
 	r.mu.Unlock()
 
 	r.observeFailure(ctx, name, command, err, false, now, dispatchID, attempt)
+}
+
+func (r *Runtime) recordCommandPanic(ctx context.Context, name string, generation uint64, command string, err error, dispatchID string, attempt int) {
+	r.mu.Lock()
+
+	state := r.workerStates[name]
+	now := time.Now()
+	var obs workerStateObservation
+	lifecycleChanged := false
+	if state.generation == generation {
+		state.lastCommandFailure = &CommandFailureInfo{
+			Command: command,
+			Message: err.Error(),
+			At:      now,
+		}
+		switch state.lifecycle {
+		case StateRunning, StateDraining:
+			before := state
+			state.lastTransition = &LifecycleTransition{
+				From: state.lifecycle,
+				To:   StateFailed,
+				At:   now,
+			}
+			state.lifecycle = StateFailed
+			state.ready = false
+			state.acceptingWork = false
+			state.readySetDuringStart = false
+			state.acceptingWorkSetDuringStart = false
+			state.failureReportedDuringStart = false
+			state.lastFailure = &FailureInfo{
+				Message: err.Error(),
+				At:      now,
+			}
+			obs = r.commitWorkerStateLocked(name, before, state, now)
+			lifecycleChanged = true
+		default:
+			r.workerStates[name] = state
+		}
+	}
+	r.mu.Unlock()
+
+	if lifecycleChanged {
+		if obs.from != obs.to {
+			r.observeTransition(ctx, obs.worker, obs.from, obs.to, obs.at)
+		}
+		r.observeReadinessChange(ctx, obs.worker, obs.beforeReady, obs.afterReady, obs.at)
+	}
+	r.observeFailure(ctx, name, command, err, true, now, dispatchID, attempt)
+	if lifecycleChanged {
+		r.observeRuntimeChanges(ctx, obs.before, obs.after)
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -1220,7 +1456,7 @@ func (r *Runtime) lookupCommandTarget(req CommandRequest) (workerConfig, command
 	return r.workerConfigs[req.Worker], reg, nil
 }
 
-func (r *Runtime) admitCommand(name string) error {
+func (r *Runtime) admitCommand(name string) (uint64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -1229,35 +1465,35 @@ func (r *Runtime) admitCommand(name string) error {
 	// can target a specific worker.
 	switch r.status.State {
 	case StateFailed, StateStopping, StateStopped, StateRegistered:
-		return fmt.Errorf("%w: runtime %q is in state %q", ErrRuntimeNotAcceptingWork, r.identity.Name, r.status.State)
+		return 0, fmt.Errorf("%w: runtime %q is in state %q", ErrRuntimeNotAcceptingWork, r.identity.Name, r.status.State)
 	}
 
 	state, ok := r.workerStates[name]
 	if !ok {
-		return fmt.Errorf("%w: %s", ErrWorkerNotFound, name)
+		return 0, fmt.Errorf("%w: %s", ErrWorkerNotFound, name)
 	}
 	if state.lifecycle != StateRunning {
-		return fmt.Errorf("%w: cannot dispatch to worker %q in state %q", ErrInvalidWorkerState, name, state.lifecycle)
+		return 0, fmt.Errorf("%w: cannot dispatch to worker %q in state %q", ErrInvalidWorkerState, name, state.lifecycle)
 	}
 	if !state.acceptingWork {
-		return fmt.Errorf("%w: worker %q", ErrWorkerNotAcceptingWork, name)
+		return 0, fmt.Errorf("%w: worker %q", ErrWorkerNotAcceptingWork, name)
 	}
 
 	// Runtime and worker command caps are separate gates. A command needs
 	// capacity in both scopes before it can run.
 	if r.config.commandConcurrency > 0 && r.status.InFlight >= r.config.commandConcurrency {
-		return fmt.Errorf("%w: limit=%d", ErrRuntimeSaturated, r.config.commandConcurrency)
+		return 0, fmt.Errorf("%w: limit=%d", ErrRuntimeSaturated, r.config.commandConcurrency)
 	}
 
 	cfg := r.workerConfigs[name]
 	if cfg.commandConcurrency > 0 && state.inFlight >= cfg.commandConcurrency {
-		return fmt.Errorf("%w: worker=%s limit=%d", ErrWorkerSaturated, name, cfg.commandConcurrency)
+		return 0, fmt.Errorf("%w: worker=%s limit=%d", ErrWorkerSaturated, name, cfg.commandConcurrency)
 	}
 
 	state.inFlight++
 	r.workerStates[name] = state
 	r.status.InFlight++
-	return nil
+	return state.generation, nil
 }
 
 func (r *Runtime) releaseCommandSlot(name string) {
@@ -1282,15 +1518,16 @@ func (r *Runtime) releaseCommandSlot(name string) {
 }
 
 // recoverCommandPanic applies command panic policy after handler execution.
-// Recovered command panics fail the worker and either become the returned
-// command error or are re-thrown for crash policy.
-func (r *Runtime) recoverCommandPanic(ctx context.Context, req CommandRequest, cfg workerConfig, dispatchID string, attempts *int, res *CommandResult, err *error) {
+// Recovered command panics become the returned command error or are re-thrown
+// for crash policy. Only current-generation panics from running or draining
+// workers fail lifecycle; late panics retain stopped/stopping state.
+func (r *Runtime) recoverCommandPanic(ctx context.Context, req CommandRequest, cfg workerConfig, generation uint64, dispatchID string, attempts *int, res *CommandResult, err *error) {
 	if recovered := recover(); recovered != nil {
 		panicErr := newRecoveredPanicError(
 			fmt.Sprintf("handling command %q for worker %q", req.Name, req.Worker),
 			recovered,
 		)
-		r.failWorkerWithCommandAttempt(ctx, req.Worker, req.Name, panicErr, true, dispatchID, *attempts)
+		r.recordCommandPanic(ctx, req.Worker, generation, req.Name, panicErr, dispatchID, *attempts)
 		*err = panicErr
 		*res = CommandResult{}
 		if cfg.panicPolicy == PanicPolicyCrash {
@@ -1306,19 +1543,19 @@ func (r *Runtime) recoverCommandPanic(ctx context.Context, req CommandRequest, c
 // automatically move the worker to StateFailed. Panics escape this retry loop
 // and are handled by Dispatch-level panic recovery. Worker code can call
 // WorkerRuntime.ReportFailure when a command error reflects worker health.
-func (r *Runtime) executeCommand(ctx context.Context, req CommandRequest, reg commandRegistration, cfg workerConfig, dispatchID string, attempts *int) (CommandResult, error) {
+func (r *Runtime) executeCommand(ctx context.Context, req CommandRequest, reg commandRegistration, cfg workerConfig, generation uint64, dispatchID string, attempts *int) (CommandResult, error) {
 	var res CommandResult
 
 	err := runWithRetry(ctx, cfg.commandTimeout, cfg.commandRetryPolicy, func(attemptCtx context.Context, attempt int) error {
 		*attempts = attempt
-		attemptCtx = withWorkerRuntime(attemptCtx, r.workerRuntimeHandle(attemptCtx, req.Worker))
+		attemptCtx = withWorkerRuntime(attemptCtx, r.workerRuntimeHandle(attemptCtx, req.Worker, generation))
 		attemptResult, attemptErr := reg.Handler.HandleCommand(attemptCtx, req)
 		if attemptErr == nil {
 			res = attemptResult
 		}
 		return attemptErr
 	}, func(opErr error, attempt int) {
-		r.recordCommandFailure(ctx, req.Worker, req.Name, opErr, dispatchID, attempt)
+		r.recordCommandFailure(ctx, req.Worker, generation, req.Name, opErr, dispatchID, attempt)
 	})
 	if err != nil {
 		return CommandResult{}, err
@@ -1394,6 +1631,7 @@ func waitBeforeRetry(ctx context.Context, delay time.Duration) error {
 type workerState struct {
 	qualifiedName string
 	localName     string
+	generation    uint64
 	lifecycle     LifecycleState
 	ready         bool
 	acceptingWork bool
@@ -1401,6 +1639,7 @@ type workerState struct {
 
 	readySetDuringStart         bool
 	acceptingWorkSetDuringStart bool
+	failureReportedDuringStart  bool
 
 	lastTransition     *LifecycleTransition
 	lastFailure        *FailureInfo

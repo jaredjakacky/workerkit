@@ -67,6 +67,9 @@ func WithLoopStart(fn func(context.Context, WorkerRuntime) error) LoopWorkerOpti
 
 // WithLoopStop sets an optional cleanup hook run after the loop goroutine
 // stops. The hook runs at most once, including after an unexpected loop failure.
+// Stop waits for an in-progress cleanup hook before returning. If Stop times
+// out before the loop exits, a later Stop resumes waiting on the same loop and
+// cleanup; Start remains blocked until both complete.
 func WithLoopStop(fn func(context.Context, WorkerRuntime) error) LoopWorkerOption {
 	return func(cfg *loopWorkerConfig) {
 		cfg.onStop = fn
@@ -93,8 +96,10 @@ func WithLoopAutoReady(enabled bool) LoopWorkerOption {
 // Use NewLoopWorker to construct one with production-oriented lifecycle
 // behavior: Start launches the loop in a goroutine, Stop cancels the loop and
 // waits for it to exit, and unexpected loop exits are reported through
-// WorkerRuntime.ReportFailure. By default, Start marks the worker ready after
-// the loop goroutine starts. This is only a launch-readiness signal. Use
+// WorkerRuntime.ReportFailure before stop completion is published. Cancellation
+// errors caused by Stop are treated as normal exits, while independent errors
+// racing with Stop remain failures. By default, Start marks the worker ready
+// after the loop goroutine starts. This is only a launch-readiness signal. Use
 // WithLoopAutoReady(false) when readiness depends on domain warmup inside the
 // loop, such as acquiring a lease, connecting to a broker, loading initial
 // state, completing a first poll, or validating external dependencies. In that
@@ -118,7 +123,10 @@ type LoopWorker struct {
 	done    chan struct{}
 	runtime WorkerRuntime
 
-	stopHookCalled bool
+	stopHookRunning  bool
+	stopHookComplete bool
+	stopHookDone     chan struct{}
+	stopHookErr      error
 }
 
 // NewLoopWorker constructs a LoopWorker for a long-running background loop.
@@ -231,7 +239,14 @@ func (w *LoopWorker) beginStart() error {
 	if w.state == loopStarting || w.state == loopRunning || w.state == loopStopping {
 		return fmt.Errorf("%w: state=%s", ErrLoopWorkerActive, w.state)
 	}
+	if w.state == loopStopped && !w.stopHookComplete {
+		return fmt.Errorf("%w: state=%s cleanup=pending", ErrLoopWorkerActive, w.state)
+	}
 	w.state = loopStarting
+	w.stopHookRunning = false
+	w.stopHookComplete = false
+	w.stopHookDone = make(chan struct{})
+	w.stopHookErr = nil
 	return nil
 }
 
@@ -243,7 +258,6 @@ func (w *LoopWorker) finishStart(runtime WorkerRuntime, cancel context.CancelFun
 	w.cancel = cancel
 	w.done = done
 	w.state = loopRunning
-	w.stopHookCalled = false
 }
 
 func (w *LoopWorker) finishFailedStart() {
@@ -257,10 +271,16 @@ func (w *LoopWorker) beginStop() (context.CancelFunc, chan struct{}, WorkerRunti
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.state != loopRunning || w.cancel == nil || w.done == nil {
+	if w.cancel == nil || w.done == nil {
 		return nil, nil, w.runtime, false
 	}
-	w.state = loopStopping
+	switch w.state {
+	case loopRunning:
+		w.state = loopStopping
+	case loopStopping:
+	default:
+		return nil, nil, w.runtime, false
+	}
 	return w.cancel, w.done, w.runtime, true
 }
 
@@ -277,22 +297,14 @@ func (w *LoopWorker) runLoop(ctx context.Context, runtime WorkerRuntime, done ch
 	err := w.loop(ctx, runtime)
 
 	w.mu.Lock()
-	stopping := w.state == loopStopping
-	if w.done == done {
-		w.cancel = nil
-		w.done = nil
-		w.runtime = nil
-		if stopping {
-			w.state = loopStopped
-		} else {
-			w.state = loopIdle
-		}
+	stopRequested := w.state == loopStopping && ctx.Err() != nil
+	if w.done == done && !stopRequested {
+		w.state = loopStopping
 	}
 	w.mu.Unlock()
 
-	close(done)
-
-	if stopping && ctx.Err() != nil {
+	if stopRequested && intentionalLoopStop(err, ctx.Err()) {
+		w.finishLoop(done)
 		return
 	}
 	if err == nil {
@@ -310,26 +322,78 @@ func (w *LoopWorker) runLoop(ctx context.Context, runtime WorkerRuntime, done ch
 		defer cancel()
 		_ = w.runStopHook(stopCtx, runtime)
 	}
+	w.finishLoop(done)
+}
+
+func intentionalLoopStop(loopErr, contextErr error) bool {
+	return contextErr != nil && (loopErr == nil || errors.Is(loopErr, contextErr))
+}
+
+func (w *LoopWorker) finishLoop(done chan struct{}) {
+	w.mu.Lock()
+	if w.done == done {
+		w.cancel = nil
+		w.done = nil
+		w.runtime = nil
+		w.state = loopStopped
+	}
+	w.mu.Unlock()
+	close(done)
 }
 
 func (w *LoopWorker) runStopHook(ctx context.Context, runtime WorkerRuntime) error {
-	if !w.claimStopHook() {
-		return nil
+	done, run, err := w.beginStopHook()
+	if err != nil || !run {
+		if err != nil {
+			return err
+		}
+		select {
+		case <-done:
+			return w.completedStopHookError()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
-	if w.onStop == nil {
-		return nil
+
+	defer func() {
+		w.finishStopHook(done, err)
+	}()
+	if w.onStop != nil {
+		err = w.onStop(ctx, runtime)
 	}
-	return w.onStop(ctx, runtime)
+	return err
 }
 
-func (w *LoopWorker) claimStopHook() bool {
+func (w *LoopWorker) beginStopHook() (chan struct{}, bool, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.stopHookCalled {
-		return false
+	if w.stopHookComplete {
+		return w.stopHookDone, false, nil
 	}
-	w.stopHookCalled = true
-	w.state = loopStopped
-	return true
+	if w.stopHookDone == nil {
+		w.stopHookDone = make(chan struct{})
+	}
+	if w.stopHookRunning {
+		return w.stopHookDone, false, nil
+	}
+	w.stopHookRunning = true
+	return w.stopHookDone, true, nil
+}
+
+func (w *LoopWorker) finishStopHook(done chan struct{}, err error) {
+	w.mu.Lock()
+	if w.stopHookDone == done && !w.stopHookComplete {
+		w.stopHookErr = err
+		w.stopHookRunning = false
+		w.stopHookComplete = true
+		close(done)
+	}
+	w.mu.Unlock()
+}
+
+func (w *LoopWorker) completedStopHookError() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.stopHookErr
 }

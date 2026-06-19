@@ -32,9 +32,18 @@ import "context"
 // call when some resources were never acquired, were already released, or when
 // background work has already exited.
 //
+// If Stop returns because its context expired before cleanup completed, a later
+// Stop may be called to resume waiting and finish cleanup. Start must not launch
+// duplicate background work while the previous stop remains active.
+//
 // Start and Stop must honor context cancellation. Runtime timeouts are delivered
 // through ctx.Done(). Workerkit cannot interrupt implementations that block
 // without observing the context.
+//
+// Runtime lifecycle operations are serialized and the lifecycle gate is not
+// reentrant. Start and Stop implementations must not call public Runtime
+// lifecycle methods. Use WorkerRuntime for worker-scoped status, readiness,
+// command admission, and failure reporting.
 //
 // NewLoopWorker provides a ready-made implementation for workers backed by a
 // long-running background loop.
@@ -78,15 +87,19 @@ type WorkerRuntime interface {
 	// worker-owned goroutines that fail outside a direct Start, Stop, or command
 	// handler return path. ReportFailure applies the worker failure policy. It
 	// does not call Stop or clean up worker-owned resources. A nil error is
-	// ignored. Reporting failure during Start causes Start to return an error
-	// even if Worker.Start later returns nil.
+	// ignored. Worker.Start should return setup errors directly; ReportFailure
+	// records worker health independently of the Start return path. If a current
+	// generation reports failure while Start is running, Start may still return
+	// nil while the worker finishes in StateFailed.
 	ReportFailure(error) error
 }
 
 type workerRuntimeContextKey struct{}
 
 // WorkerRuntimeFromContext returns the runtime-owned worker handle from contexts
-// passed to Worker.Start, Worker.Stop, and command handlers by Workerkit.
+// passed to Worker.Start, Worker.Stop, and command handlers by Workerkit. A
+// handle is scoped to the worker lifecycle generation that created it; mutation
+// calls from a stale handle return ErrInvalidWorkerState after restart.
 func WorkerRuntimeFromContext(ctx context.Context) (WorkerRuntime, bool) {
 	if ctx == nil {
 		return nil, false
@@ -102,9 +115,10 @@ func WorkerRuntimeFromContext(ctx context.Context) (WorkerRuntime, bool) {
 // update its own readiness, command admission, and failure state without
 // receiving access to the full Runtime.
 type workerControlHandle struct {
-	runtime *Runtime
-	name    string
-	ctx     context.Context
+	runtime    *Runtime
+	name       string
+	generation uint64
+	ctx        context.Context
 }
 
 func (h *workerControlHandle) Name() string {
@@ -117,15 +131,15 @@ func (h *workerControlHandle) Status() WorkerStatus {
 }
 
 func (h *workerControlHandle) SetReady(ready bool) error {
-	return h.runtime.setWorkerReady(h.context(), h.name, ready)
+	return h.runtime.setWorkerReady(h.context(), h.name, h.generation, ready)
 }
 
 func (h *workerControlHandle) SetAcceptingWork(accepting bool) error {
-	return h.runtime.setWorkerAcceptingWork(h.name, accepting)
+	return h.runtime.setWorkerAcceptingWork(h.name, h.generation, accepting)
 }
 
 func (h *workerControlHandle) ReportFailure(err error) error {
-	return h.runtime.reportWorkerFailure(h.context(), h.name, err)
+	return h.runtime.reportWorkerFailure(h.context(), h.name, h.generation, err)
 }
 
 func (h *workerControlHandle) context() context.Context {

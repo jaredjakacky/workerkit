@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"sync"
 	"testing"
 
 	workerkit "github.com/jaredjakacky/workerkit"
@@ -88,14 +89,15 @@ func TestWorkerkitRuntimeDirectly(t *testing.T) {
 		t.Fatal("runtime ready after shutdown = true, want false")
 	}
 
-	if !slices.Contains(observer.transitions, "test_service/worker:registered->starting") {
-		t.Fatalf("observer transitions = %#v, want worker start transition", observer.transitions)
+	events := observer.snapshot()
+	if !slices.Contains(events.transitions, "test_service/worker:registered->starting") {
+		t.Fatalf("observer transitions = %#v, want worker start transition", events.transitions)
 	}
-	if !slices.Contains(observer.commands, "test_service/worker:worker/echo:true") {
-		t.Fatalf("observer commands = %#v, want successful command observation", observer.commands)
+	if !slices.Contains(events.commands, "test_service/worker:worker/echo:true") {
+		t.Fatalf("observer commands = %#v, want successful command observation", events.commands)
 	}
-	if !slices.Contains(observer.readiness, "test_service/worker:true") {
-		t.Fatalf("observer readiness = %#v, want worker ready event", observer.readiness)
+	if !slices.Contains(events.readiness, "test_service/worker:true") {
+		t.Fatalf("observer readiness = %#v, want worker ready event", events.readiness)
 	}
 }
 
@@ -121,17 +123,23 @@ func echoCommand(ctx context.Context, req workerkit.CommandRequest) (workerkit.C
 }
 
 type recordingObserver struct {
+	mu sync.Mutex
+
 	transitions []string
 	commands    []string
 	readiness   []string
 }
 
 func (o *recordingObserver) ObserveTransition(ctx context.Context, event workerkit.TransitionEvent) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	o.transitions = append(o.transitions, fmt.Sprintf("%s:%s->%s", event.Worker, event.From, event.To))
 }
 
 func (o *recordingObserver) StartCommand(ctx context.Context, event workerkit.CommandStartEvent) (context.Context, workerkit.CommandObservation) {
 	return ctx, workerkit.CommandObservationFunc(func(ctx context.Context, end workerkit.CommandEndEvent) {
+		o.mu.Lock()
+		defer o.mu.Unlock()
 		o.commands = append(o.commands, fmt.Sprintf("%s:%s:%t", end.Worker, end.Command, end.Success))
 	})
 }
@@ -139,7 +147,25 @@ func (o *recordingObserver) StartCommand(ctx context.Context, event workerkit.Co
 func (o *recordingObserver) ObserveFailure(ctx context.Context, event workerkit.FailureEvent) {}
 
 func (o *recordingObserver) ObserveReadiness(ctx context.Context, event workerkit.ReadinessEvent) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	o.readiness = append(o.readiness, fmt.Sprintf("%s:%t", event.Worker, event.Ready))
+}
+
+type recordingObserverSnapshot struct {
+	transitions []string
+	commands    []string
+	readiness   []string
+}
+
+func (o *recordingObserver) snapshot() recordingObserverSnapshot {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return recordingObserverSnapshot{
+		transitions: append([]string(nil), o.transitions...),
+		commands:    append([]string(nil), o.commands...),
+		readiness:   append([]string(nil), o.readiness...),
+	}
 }
 
 func mustJSON(t *testing.T, v any) []byte {

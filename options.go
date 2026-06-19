@@ -128,7 +128,8 @@ type workerConfig struct {
 	// errors. Command handler returned errors are command failures: Workerkit
 	// records LastCommandFailure and emits observer events, but does not
 	// automatically move the worker to failed. Command panics are recovered
-	// according to panic policy and currently fail the worker.
+	// according to panic policy and fail lifecycle only while the current worker
+	// generation is running or draining.
 	panicPolicy   PanicPolicy
 	failurePolicy FailurePolicy
 
