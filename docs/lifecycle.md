@@ -55,6 +55,11 @@ During startup, Workerkit applies:
 Start timeouts are cooperative. Workerkit passes a deadline through the start
 context; `Worker.Start` must observe `ctx.Done()` and return.
 
+A lifecycle generation spans the whole Start operation, including retries.
+Start retry does not isolate `WorkerRuntime` handles retained by failed
+attempts. Before returning an error, a failed attempt must stop any goroutines
+or callbacks that could continue using its handle.
+
 ## Running Versus Ready
 
 Running does not imply ready.
@@ -139,6 +144,11 @@ admitted commands finish. `Worker.Stop` may run concurrently with those command
 handlers, so it must not release resources they still need unless the caller
 first composes `Drain`, `WaitIdle`, and `Stop`.
 
+Because command slots are released only when admitted handlers exit, a
+restarted worker may temporarily report positive `InFlight` for commands
+admitted by an older generation. Those commands continue to count toward worker
+and runtime concurrency limits and idle waits.
+
 ## Shutdown
 
 `Shutdown` is the direct runtime convenience path for non-HTTP callers:
@@ -175,6 +185,12 @@ Worker runtime handles are scoped to one lifecycle generation. A loop, command,
 or callback retained from an older generation cannot change readiness,
 admission, or failure state after the worker restarts.
 
+`ReportFailure` accepted while a worker is stopping records `LastFailure` and
+emits failure observation without replacing the stopping lifecycle. A successful
+Stop can still complete to `stopped`, preserving that failure for inspection.
+Reports made after Stop completes, or through a stale generation handle after
+restart, return `ErrInvalidWorkerState` without mutating current worker status.
+
 When `LoopWorker.Stop` times out before its loop exits, the original stop remains
 active. A later Stop waits on that same loop and runs the configured cleanup hook
 at most once. Restart remains blocked until the loop has exited and cleanup has
@@ -189,9 +205,9 @@ Direct Stop does not wait for or cancel in-flight commands. Successful late
 completion only releases command capacity. A late returned error or panic from
 the current generation remains visible through `LastCommandFailure` and failure
 observation, but it does not move a stopping or stopped worker back to `failed`.
-After restart, stale command failures are still observed but cannot mutate the
-new generation's status. Use Drain, WaitIdle, and Stop when shutdown must wait
-for all admitted command work.
+After restart, returned errors and panics from stale commands are still observed
+but cannot mutate the new generation's status. Use Drain, WaitIdle, and Stop
+when shutdown must wait for all admitted command work.
 
 Failure policy determines how that worker failure affects aggregate runtime
 status:

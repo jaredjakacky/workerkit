@@ -1553,17 +1553,36 @@ func TestStaleCommandErrorDoesNotMutateRestartedWorker(t *testing.T) {
 	if err := rt.Start(context.Background(), "worker"); err != nil {
 		t.Fatalf("second Start returned error: %v", err)
 	}
+	snapshot := requireWorker(t, rt, "worker")
+	if snapshot.Status.State != StateRunning || !snapshot.Status.Ready || !snapshot.Status.AcceptingWork {
+		t.Fatalf("worker state/ready/accepting = %s/%t/%t, want running/true/true", snapshot.Status.State, snapshot.Status.Ready, snapshot.Status.AcceptingWork)
+	}
+	if snapshot.Status.InFlight != 1 {
+		t.Fatalf("worker in-flight before stale command completion = %d, want 1", snapshot.Status.InFlight)
+	}
+	if snapshot.Status.LastFailure != nil || snapshot.Status.LastCommandFailure != nil {
+		t.Fatalf("failure status before stale command completion = %#v/%#v, want nil/nil", snapshot.Status.LastFailure, snapshot.Status.LastCommandFailure)
+	}
+	if status := rt.RuntimeStatus(); status.State != StateRunning || status.InFlight != 1 {
+		t.Fatalf("runtime state/in-flight before stale command completion = %s/%d, want running/1", status.State, status.InFlight)
+	}
 
 	close(release)
 	if err := <-dispatchDone; !errors.Is(err, commandErr) {
 		t.Fatalf("Dispatch error = %v, want %v", err, commandErr)
 	}
-	snapshot := requireWorker(t, rt, "worker")
+	snapshot = requireWorker(t, rt, "worker")
 	if snapshot.Status.State != StateRunning {
 		t.Fatalf("worker state = %s, want %s", snapshot.Status.State, StateRunning)
 	}
+	if snapshot.Status.InFlight != 0 {
+		t.Fatalf("worker in-flight after stale command completion = %d, want 0", snapshot.Status.InFlight)
+	}
 	if snapshot.Status.LastFailure != nil || snapshot.Status.LastCommandFailure != nil {
 		t.Fatalf("failure status = %#v/%#v, want nil/nil", snapshot.Status.LastFailure, snapshot.Status.LastCommandFailure)
+	}
+	if status := rt.RuntimeStatus(); status.State != StateRunning || status.InFlight != 0 {
+		t.Fatalf("runtime state/in-flight after stale command completion = %s/%d, want running/0", status.State, status.InFlight)
 	}
 	events := observer.snapshot()
 	if got := len(events.failures); got != 1 || !errors.Is(events.failures[0].Err, commandErr) {
@@ -1572,6 +1591,186 @@ func TestStaleCommandErrorDoesNotMutateRestartedWorker(t *testing.T) {
 	t.Cleanup(func() {
 		_ = rt.Stop(context.Background(), "worker")
 	})
+}
+
+func TestCommandReportFailureWhileStoppingPreservesStoppingLifecycle(t *testing.T) {
+	failure := errors.New("command reported failure while stopping")
+	commandEntered := make(chan struct{})
+	reportNow := make(chan struct{})
+	reportDone := make(chan error, 1)
+	stopEntered := make(chan struct{})
+	stopRelease := make(chan struct{})
+	observer := &recordingObserver{}
+	rt := newTestRuntime(t, WithObserver(observer))
+	registerCommandReportingFailure(t, rt, testWorker{stop: func(context.Context) error {
+		close(stopEntered)
+		<-stopRelease
+		return nil
+	}}, failure, commandEntered, reportNow, reportDone)
+	if err := rt.Start(context.Background(), "worker"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	dispatchDone := make(chan error, 1)
+	go func() {
+		_, err := rt.Dispatch(context.Background(), CommandRequest{Worker: "worker", Name: "report"})
+		dispatchDone <- err
+	}()
+	<-commandEntered
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- rt.Stop(context.Background(), "worker")
+	}()
+	<-stopEntered
+
+	close(reportNow)
+	if err := <-reportDone; err != nil {
+		t.Fatalf("ReportFailure returned error: %v", err)
+	}
+	if err := <-dispatchDone; err != nil {
+		t.Fatalf("Dispatch returned error: %v", err)
+	}
+	snapshot := requireWorker(t, rt, "worker")
+	if snapshot.Status.State != StateStopping {
+		t.Fatalf("worker state = %s, want %s", snapshot.Status.State, StateStopping)
+	}
+	if snapshot.Status.LastFailure == nil || snapshot.Status.LastFailure.Message != failure.Error() {
+		t.Fatalf("LastFailure = %#v, want %q", snapshot.Status.LastFailure, failure.Error())
+	}
+	if snapshot.Status.LastCommandFailure != nil {
+		t.Fatalf("LastCommandFailure = %#v, want nil", snapshot.Status.LastCommandFailure)
+	}
+	if snapshot.Status.Ready || snapshot.Status.AcceptingWork {
+		t.Fatalf("worker ready/accepting = %t/%t, want false/false", snapshot.Status.Ready, snapshot.Status.AcceptingWork)
+	}
+	events := observer.snapshot()
+	if got := len(events.failures); got != 1 || events.failures[0].Command != "" || events.failures[0].Panic || !errors.Is(events.failures[0].Err, failure) {
+		t.Fatalf("failure events = %#v, want one worker failure", events.failures)
+	}
+
+	close(stopRelease)
+	if err := <-stopDone; err != nil {
+		t.Fatalf("Stop returned error: %v", err)
+	}
+	snapshot = requireWorker(t, rt, "worker")
+	if snapshot.Status.State != StateStopped {
+		t.Fatalf("worker state = %s, want %s", snapshot.Status.State, StateStopped)
+	}
+	if snapshot.Status.LastFailure == nil || snapshot.Status.LastFailure.Message != failure.Error() {
+		t.Fatalf("LastFailure after Stop = %#v, want %q", snapshot.Status.LastFailure, failure.Error())
+	}
+}
+
+func TestCommandReportFailureAfterStopReturnsInvalidWorkerState(t *testing.T) {
+	failure := errors.New("command reported failure after stop")
+	commandEntered := make(chan struct{})
+	reportNow := make(chan struct{})
+	reportDone := make(chan error, 1)
+	observer := &recordingObserver{}
+	rt := newTestRuntime(t, WithObserver(observer))
+	registerCommandReportingFailure(t, rt, testWorker{}, failure, commandEntered, reportNow, reportDone)
+	if err := rt.Start(context.Background(), "worker"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	dispatchDone := make(chan error, 1)
+	go func() {
+		_, err := rt.Dispatch(context.Background(), CommandRequest{Worker: "worker", Name: "report"})
+		dispatchDone <- err
+	}()
+	<-commandEntered
+	if err := rt.Stop(context.Background(), "worker"); err != nil {
+		t.Fatalf("Stop returned error: %v", err)
+	}
+
+	close(reportNow)
+	if err := <-reportDone; !errors.Is(err, ErrInvalidWorkerState) {
+		t.Fatalf("ReportFailure error = %v, want ErrInvalidWorkerState", err)
+	}
+	if err := <-dispatchDone; err != nil {
+		t.Fatalf("Dispatch returned error: %v", err)
+	}
+	snapshot := requireWorker(t, rt, "worker")
+	if snapshot.Status.State != StateStopped {
+		t.Fatalf("worker state = %s, want %s", snapshot.Status.State, StateStopped)
+	}
+	if snapshot.Status.LastFailure != nil || snapshot.Status.LastCommandFailure != nil {
+		t.Fatalf("failure status = %#v/%#v, want nil/nil", snapshot.Status.LastFailure, snapshot.Status.LastCommandFailure)
+	}
+	if got := len(observer.snapshot().failures); got != 0 {
+		t.Fatalf("failure event count = %d, want 0", got)
+	}
+}
+
+func TestStaleCommandReportFailureDoesNotMutateRestartedWorker(t *testing.T) {
+	failure := errors.New("stale command reported failure")
+	commandEntered := make(chan struct{})
+	reportNow := make(chan struct{})
+	reportDone := make(chan error, 1)
+	observer := &recordingObserver{}
+	rt := newTestRuntime(t, WithObserver(observer))
+	registerCommandReportingFailure(t, rt, testWorker{}, failure, commandEntered, reportNow, reportDone)
+	if err := rt.Start(context.Background(), "worker"); err != nil {
+		t.Fatalf("first Start returned error: %v", err)
+	}
+	dispatchDone := make(chan error, 1)
+	go func() {
+		_, err := rt.Dispatch(context.Background(), CommandRequest{Worker: "worker", Name: "report"})
+		dispatchDone <- err
+	}()
+	<-commandEntered
+	if err := rt.Stop(context.Background(), "worker"); err != nil {
+		t.Fatalf("Stop returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "worker"); err != nil {
+		t.Fatalf("second Start returned error: %v", err)
+	}
+
+	close(reportNow)
+	if err := <-reportDone; !errors.Is(err, ErrInvalidWorkerState) {
+		t.Fatalf("ReportFailure error = %v, want ErrInvalidWorkerState", err)
+	}
+	if err := <-dispatchDone; err != nil {
+		t.Fatalf("Dispatch returned error: %v", err)
+	}
+	snapshot := requireWorker(t, rt, "worker")
+	if snapshot.Status.State != StateRunning || !snapshot.Status.Ready || !snapshot.Status.AcceptingWork {
+		t.Fatalf("worker state/ready/accepting = %s/%t/%t, want running/true/true", snapshot.Status.State, snapshot.Status.Ready, snapshot.Status.AcceptingWork)
+	}
+	if snapshot.Status.LastFailure != nil || snapshot.Status.LastCommandFailure != nil {
+		t.Fatalf("failure status = %#v/%#v, want nil/nil", snapshot.Status.LastFailure, snapshot.Status.LastCommandFailure)
+	}
+	if got := len(observer.snapshot().failures); got != 0 {
+		t.Fatalf("failure event count = %d, want 0", got)
+	}
+	t.Cleanup(func() {
+		_ = rt.Stop(context.Background(), "worker")
+	})
+}
+
+func registerCommandReportingFailure(
+	t *testing.T,
+	rt *Runtime,
+	worker Worker,
+	failure error,
+	commandEntered chan<- struct{},
+	reportNow <-chan struct{},
+	reportDone chan<- error,
+) {
+	t.Helper()
+	if err := rt.Register(
+		WorkerSpec{Name: "worker", Worker: worker},
+		WithCommand("report", CommandHandlerFunc(func(ctx context.Context, _ CommandRequest) (CommandResult, error) {
+			workerRuntime, ok := WorkerRuntimeFromContext(ctx)
+			if !ok {
+				return CommandResult{}, errors.New("missing WorkerRuntime")
+			}
+			close(commandEntered)
+			<-reportNow
+			reportDone <- workerRuntime.ReportFailure(failure)
+			return CommandResult{}, nil
+		})),
+	); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
 }
 
 func TestCommandPanicAfterStopPreservesStoppedLifecycle(t *testing.T) {
@@ -1776,4 +1975,51 @@ func TestStartRetryRetriesFailedAttemptsAndClearsLastFailureOnSuccess(t *testing
 	if snapshot.Status.LastFailure != nil {
 		t.Fatalf("LastFailure = %#v, want nil after successful start", snapshot.Status.LastFailure)
 	}
+}
+
+func TestStartRetryAttemptsShareWorkerRuntimeGeneration(t *testing.T) {
+	startFailure := errors.New("transient start failure")
+	var handles []WorkerRuntime
+	rt := newTestRuntime(t)
+	if err := rt.Register(
+		WorkerSpec{
+			Name: "worker",
+			Worker: testWorker{start: func(ctx context.Context) error {
+				workerRuntime, ok := WorkerRuntimeFromContext(ctx)
+				if !ok {
+					return errors.New("missing WorkerRuntime")
+				}
+				handles = append(handles, workerRuntime)
+				if len(handles) == 1 {
+					return startFailure
+				}
+				return nil
+			}},
+		},
+		WithWorkerStartRetry(retrykit.Attempts(2, nil, nil)),
+	); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "worker"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	if len(handles) != 2 {
+		t.Fatalf("WorkerRuntime handles = %d, want 2", len(handles))
+	}
+
+	if err := handles[0].SetReady(false); err != nil {
+		t.Fatalf("first-attempt SetReady returned error: %v", err)
+	}
+	if snapshot := requireWorkerState(t, rt, "worker", StateRunning); snapshot.Status.Ready {
+		t.Fatal("worker ready = true, want false after first-attempt handle update")
+	}
+	if err := handles[1].SetReady(true); err != nil {
+		t.Fatalf("second-attempt SetReady returned error: %v", err)
+	}
+	if snapshot := requireWorkerState(t, rt, "worker", StateRunning); !snapshot.Status.Ready {
+		t.Fatal("worker ready = false, want true after second-attempt handle update")
+	}
+	t.Cleanup(func() {
+		_ = rt.Stop(context.Background(), "worker")
+	})
 }
