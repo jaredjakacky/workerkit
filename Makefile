@@ -8,7 +8,7 @@ PKGS ?= ./...
 COVER_PKGS ?= $(shell $(GO) list $(PKGS) | grep -v '/examples')
 GOFILES := $(filter-out $(shell git ls-files --deleted -- '*.go'),$(shell git ls-files -- '*.go'))
 EXAMPLE_PKGS ?= $(shell $(GO) list ./examples/... | grep -v '/examples/testing$$')
-GOVULNCHECK_VERSION ?= v1.3.0
+GOVULNCHECK_VERSION ?= v1.4.0
 ALLOW_TIDY_CHANGES ?= 0
 
 # Keep build cache inside the repo so local runs are reproducible and do not
