@@ -19,6 +19,24 @@ Workerkit uses `LifecycleState` values to describe runtime and worker state:
 Runtime status is aggregate state derived from registered workers. Worker
 status is the direct state of one managed worker.
 
+## Lifecycle Serialization
+
+`Register`, `Start`, `Drain`, `Stop`, their runtime-wide variants, and
+`Shutdown` are serialized per runtime. One lifecycle operation completes before
+the next begins, so bulk-operation snapshots cannot race another lifecycle
+mutation. Time spent waiting for the lifecycle operation gate counts against
+the caller's context deadline.
+
+Status reads, readiness updates, failure reporting, idle waits, and command
+dispatch remain concurrent. Command admission is still determined from the
+worker and runtime state at dispatch time.
+
+Worker lifecycle methods and observer callbacks run inside the active lifecycle
+operation. They must not call public `Runtime` lifecycle methods recursively;
+the lifecycle gate is intentionally non-reentrant. Worker code should use the
+scoped `WorkerRuntime` handle for readiness, command admission, status, and
+failure reporting.
+
 ## Start
 
 `Start` starts one worker. `StartAll` starts workers in registration order.
@@ -115,8 +133,11 @@ context; `Worker.Stop` must observe `ctx.Done()` and return.
 `StopAll` stops workers in reverse registration order and continues after
 individual stop failures.
 
-Stop does not wait for in-flight commands by itself. Use `Drain`, `WaitIdle`,
-and `Stop` when you need a custom graceful sequence.
+Stop does not wait for in-flight commands or cancel their contexts. A stopped
+worker may temporarily report a positive `InFlight` count while previously
+admitted commands finish. `Worker.Stop` may run concurrently with those command
+handlers, so it must not release resources they still need unless the caller
+first composes `Drain`, `WaitIdle`, and `Stop`.
 
 ## Shutdown
 
@@ -142,6 +163,35 @@ Background workers can report asynchronous failures through `WorkerRuntime`:
 ```go
 workerRuntime.ReportFailure(err)
 ```
+
+`Worker.Start` should return setup failures directly. `ReportFailure` is an
+asynchronous health signal: if the current worker generation reports failure
+while `Worker.Start` is still running, the lifecycle remains `starting` until
+the call finishes. A nil Start result then resolves the worker to `failed` while
+Start itself returns nil. This keeps concurrent Start and Stop calls from
+overlapping the active startup operation.
+
+Worker runtime handles are scoped to one lifecycle generation. A loop, command,
+or callback retained from an older generation cannot change readiness,
+admission, or failure state after the worker restarts.
+
+When `LoopWorker.Stop` times out before its loop exits, the original stop remains
+active. A later Stop waits on that same loop and runs the configured cleanup hook
+at most once. Restart remains blocked until the loop has exited and cleanup has
+completed, preventing overlapping loop generations.
+
+Stop cancellation suppresses only nil or cancellation-related loop results. If
+a loop returns an independent error while Stop races with it, Workerkit records
+that failure before publishing loop completion. Stop can still finish as
+`stopped`, while `LastFailure` preserves the unexpected exit.
+
+Direct Stop does not wait for or cancel in-flight commands. Successful late
+completion only releases command capacity. A late returned error or panic from
+the current generation remains visible through `LastCommandFailure` and failure
+observation, but it does not move a stopping or stopped worker back to `failed`.
+After restart, stale command failures are still observed but cannot mutate the
+new generation's status. Use Drain, WaitIdle, and Stop when shutdown must wait
+for all admitted command work.
 
 Failure policy determines how that worker failure affects aggregate runtime
 status:

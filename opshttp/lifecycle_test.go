@@ -75,6 +75,70 @@ func TestRuntimeLifecycleRoutesStartDrainAndStopAllWorkers(t *testing.T) {
 	assertWorkerState(t, rt, "second", workerkit.StateStopped)
 }
 
+func TestWorkerStopRouteCompletesWhileHTTPCommandRemainsInFlight(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	rt, err := workerkit.New(workerkit.Identity{Name: "ops"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	if err := rt.Register(
+		workerkit.WorkerSpec{Name: "worker", Worker: testWorker{}},
+		workerkit.WithCommand("block", workerkit.CommandHandlerFunc(func(context.Context, workerkit.CommandRequest) (workerkit.CommandResult, error) {
+			close(entered)
+			<-release
+			return workerkit.CommandResult{Message: "done"}, nil
+		})),
+	); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "worker"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	server := servekit.New()
+	if err := Mount(server, rt, WithCommandDispatchEnabled(), WithAdminLifecycleControlsEnabled()); err != nil {
+		t.Fatalf("Mount returned error: %v", err)
+	}
+
+	dispatchDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/admin/commands/dispatch",
+			bytes.NewBufferString(`{"worker":"worker","name":"block"}`),
+		)
+		req.Header.Set("Content-Type", "application/json")
+		server.Handler().ServeHTTP(rec, req)
+		dispatchDone <- rec
+	}()
+	<-entered
+
+	stop := postLifecycle(t, server, "/admin/workers/stop", `{"name":"worker"}`)
+	assertStatus(t, stop, http.StatusOK)
+	snapshot, ok := rt.Worker("worker")
+	if !ok {
+		t.Fatal("worker missing")
+	}
+	if snapshot.Status.State != workerkit.StateStopped || snapshot.Status.InFlight != 1 {
+		t.Fatalf("worker state/in-flight = %s/%d, want stopped/1", snapshot.Status.State, snapshot.Status.InFlight)
+	}
+
+	rejected := postDispatch(t, server, `{"worker":"worker","name":"block"}`)
+	assertStatus(t, rejected, http.StatusServiceUnavailable)
+
+	close(release)
+	dispatch := <-dispatchDone
+	assertStatus(t, dispatch, http.StatusOK)
+	snapshot, ok = rt.Worker("worker")
+	if !ok {
+		t.Fatal("worker missing after command completion")
+	}
+	if snapshot.Status.State != workerkit.StateStopped || snapshot.Status.InFlight != 0 {
+		t.Fatalf("worker state/in-flight = %s/%d, want stopped/0", snapshot.Status.State, snapshot.Status.InFlight)
+	}
+}
+
 func TestLifecycleRoutesAreOptIn(t *testing.T) {
 	t.Parallel()
 

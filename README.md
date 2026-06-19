@@ -313,6 +313,11 @@ Privileged lifecycle controls are also opt-in because they can start, drain, and
 
 Enable lifecycle controls with `opshttp.WithAdminLifecycleControlsEnabled()` and protect them with authentication, authorization, and audit middleware appropriate for the deployment.
 
+The worker and runtime stop routes are immediate: they close command admission
+but do not wait for or cancel commands already in flight. For graceful command
+completion over HTTP, drain, poll runtime or worker status until `inFlight` is
+zero, then stop.
+
 The route prefix defaults to `/admin` and can be changed with `opshttp.WithPrefix`. Common Servekit endpoint options can be applied to every mounted route with `opshttp.WithEndpointOptions`. Stricter policy can be applied only to command dispatch routes with `opshttp.WithDispatchOptions`, and only to lifecycle control routes with `opshttp.WithLifecycleOptions`.
 
 Command dispatch accepts raw JSON payloads and passes those bytes to `workerkit.CommandRequest.Payload`. Command responses expose `workerkit.CommandResult.Payload` as raw JSON. Workerkit does not interpret either payload; the worker owns the command contract.

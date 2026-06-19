@@ -70,6 +70,12 @@ func (h *captureHandler) lastRecord(t *testing.T) capturedRecord {
 	return h.records[len(h.records)-1]
 }
 
+func (h *captureHandler) recordCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.records)
+}
+
 func TestNewAppliesDefaultsAndOptions(t *testing.T) {
 	t.Parallel()
 
@@ -210,6 +216,32 @@ func TestObserveReadinessLogsReadyWithoutWorkerAttr(t *testing.T) {
 	requireBoolAttr(t, record, "ready", true)
 	if _, ok := record.attrs["worker"]; ok {
 		t.Fatalf("worker attr present, want omitted")
+	}
+}
+
+func TestObserverSupportsConcurrentUse(t *testing.T) {
+	t.Parallel()
+
+	const calls = 32
+	handler := &captureHandler{}
+	observer := New(slog.New(handler))
+
+	var wg sync.WaitGroup
+	for range calls {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, observation := observer.StartCommand(context.Background(), workerkit.CommandStartEvent{})
+			observer.ObserveTransition(ctx, workerkit.TransitionEvent{})
+			observer.ObserveFailure(ctx, workerkit.FailureEvent{})
+			observer.ObserveReadiness(ctx, workerkit.ReadinessEvent{})
+			observation.End(ctx, workerkit.CommandEndEvent{})
+		}()
+	}
+	wg.Wait()
+
+	if got, want := handler.recordCount(), calls*4; got != want {
+		t.Fatalf("record count = %d, want %d", got, want)
 	}
 }
 

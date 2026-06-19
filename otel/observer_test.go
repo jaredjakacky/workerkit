@@ -5,6 +5,7 @@ import (
 	"errors"
 	. "github.com/jaredjakacky/workerkit/otel"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -412,6 +413,32 @@ func TestNilInstrumentsDoNotPanic(t *testing.T) {
 	observation.End(ctx, workerkit.CommandEndEvent{Success: true})
 	observer.ObserveFailure(context.Background(), workerkit.FailureEvent{Runtime: "runtime-a"})
 	observer.ObserveReadiness(context.Background(), workerkit.ReadinessEvent{Runtime: "runtime-a"})
+}
+
+func TestObserverSupportsConcurrentUse(t *testing.T) {
+	t.Parallel()
+
+	observer, err := New(
+		WithTracerProvider(tracenoop.NewTracerProvider()),
+		WithMeterProvider(metricnoop.NewMeterProvider()),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, observation := observer.StartCommand(context.Background(), workerkit.CommandStartEvent{})
+			observer.ObserveTransition(ctx, workerkit.TransitionEvent{})
+			observer.ObserveFailure(ctx, workerkit.FailureEvent{})
+			observer.ObserveReadiness(ctx, workerkit.ReadinessEvent{})
+			observation.End(ctx, workerkit.CommandEndEvent{})
+		}()
+	}
+	wg.Wait()
 }
 
 func newTestObserver(t *testing.T) (*Observer, *recordingTracerProvider, *recordingMeterProvider) {

@@ -291,6 +291,56 @@ func TestWorkerStatusReturnsClonedFailureInfo(t *testing.T) {
 	}
 }
 
+func TestStaleWorkerRuntimeCannotMutateRestartedWorker(t *testing.T) {
+	var handles []WorkerRuntime
+	rt := newTestRuntime(t)
+	if err := rt.Register(WorkerSpec{
+		Name: "worker",
+		Worker: testWorker{
+			start: func(ctx context.Context) error {
+				runtime, ok := WorkerRuntimeFromContext(ctx)
+				if !ok {
+					t.Fatal("missing WorkerRuntime")
+				}
+				handles = append(handles, runtime)
+				return nil
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	if err := rt.Start(context.Background(), "worker"); err != nil {
+		t.Fatalf("first Start returned error: %v", err)
+	}
+	if err := rt.Stop(context.Background(), "worker"); err != nil {
+		t.Fatalf("Stop returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "worker"); err != nil {
+		t.Fatalf("second Start returned error: %v", err)
+	}
+
+	staleFailure := errors.New("stale worker failure")
+	if err := handles[0].ReportFailure(staleFailure); !errors.Is(err, ErrInvalidWorkerState) {
+		t.Fatalf("stale ReportFailure error = %v, want ErrInvalidWorkerState", err)
+	}
+	if err := handles[0].SetReady(false); !errors.Is(err, ErrInvalidWorkerState) {
+		t.Fatalf("stale SetReady error = %v, want ErrInvalidWorkerState", err)
+	}
+
+	snapshot := requireWorker(t, rt, "worker")
+	if snapshot.Status.State != StateRunning {
+		t.Fatalf("worker state = %s, want %s", snapshot.Status.State, StateRunning)
+	}
+	if snapshot.Status.LastFailure != nil {
+		t.Fatalf("LastFailure = %#v, want nil", snapshot.Status.LastFailure)
+	}
+
+	t.Cleanup(func() {
+		_ = rt.Stop(context.Background(), "worker")
+	})
+}
+
 func TestValidateWorkerLocalName(t *testing.T) {
 	valid := []string{
 		"worker",

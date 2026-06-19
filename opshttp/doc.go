@@ -53,4 +53,9 @@
 // receive a cooperative context deadline from WithLifecycleTimeout unless the
 // timeout is explicitly disabled. Worker code must observe ctx.Done() for that
 // deadline to take effect.
+//
+// Worker and runtime stop routes close command admission but do not wait for or
+// cancel commands that were already admitted. For graceful command completion,
+// drain through the lifecycle route, poll status until InFlight is zero, then
+// call the corresponding stop route.
 package opshttp

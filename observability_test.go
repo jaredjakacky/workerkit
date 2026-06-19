@@ -5,6 +5,7 @@ import (
 	"errors"
 	. "github.com/jaredjakacky/workerkit"
 	"slices"
+	"sync"
 	"testing"
 )
 
@@ -46,6 +47,7 @@ func (o panicObserver) ObserveReadiness(context.Context, ReadinessEvent) {
 }
 
 type commandObservationRecorder struct {
+	mu     sync.Mutex
 	starts int
 	ends   int
 }
@@ -53,8 +55,12 @@ type commandObservationRecorder struct {
 func (o *commandObservationRecorder) ObserveTransition(context.Context, TransitionEvent) {}
 
 func (o *commandObservationRecorder) StartCommand(ctx context.Context, _ CommandStartEvent) (context.Context, CommandObservation) {
+	o.mu.Lock()
 	o.starts++
+	o.mu.Unlock()
 	return ctx, CommandObservationFunc(func(context.Context, CommandEndEvent) {
+		o.mu.Lock()
+		defer o.mu.Unlock()
 		o.ends++
 	})
 }
@@ -63,9 +69,34 @@ func (o *commandObservationRecorder) ObserveFailure(context.Context, FailureEven
 
 func (o *commandObservationRecorder) ObserveReadiness(context.Context, ReadinessEvent) {}
 
+func (o *commandObservationRecorder) counts() (starts int, ends int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.starts, o.ends
+}
+
+type recordingEventLog struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (l *recordingEventLog) add(event string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.events = append(l.events, event)
+}
+
+func (l *recordingEventLog) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.events...)
+}
+
 type observerRecorder struct {
+	mu sync.Mutex
+
 	name         string
-	events       *[]string
+	events       *recordingEventLog
 	derivedKey   any
 	derivedValue any
 	nilCtx       bool
@@ -79,16 +110,20 @@ type observerRecorder struct {
 }
 
 func (o *observerRecorder) ObserveTransition(_ context.Context, event TransitionEvent) {
+	o.mu.Lock()
 	o.transitions = append(o.transitions, event)
+	o.mu.Unlock()
 	if o.events != nil {
-		*o.events = append(*o.events, o.name+":transition")
+		o.events.add(o.name + ":transition")
 	}
 }
 
 func (o *observerRecorder) StartCommand(ctx context.Context, event CommandStartEvent) (context.Context, CommandObservation) {
+	o.mu.Lock()
 	o.starts = append(o.starts, event)
+	o.mu.Unlock()
 	if o.events != nil {
-		*o.events = append(*o.events, o.name+":start")
+		o.events.add(o.name + ":start")
 	}
 	if o.derivedKey != nil {
 		ctx = context.WithValue(ctx, o.derivedKey, o.derivedValue)
@@ -101,24 +136,50 @@ func (o *observerRecorder) StartCommand(ctx context.Context, event CommandStartE
 		return observedCtx, nil
 	}
 	return observedCtx, CommandObservationFunc(func(_ context.Context, end CommandEndEvent) {
+		o.mu.Lock()
 		o.ends = append(o.ends, end)
+		o.mu.Unlock()
 		if o.events != nil {
-			*o.events = append(*o.events, o.name+":end")
+			o.events.add(o.name + ":end")
 		}
 	})
 }
 
 func (o *observerRecorder) ObserveFailure(_ context.Context, event FailureEvent) {
+	o.mu.Lock()
 	o.failures = append(o.failures, event)
+	o.mu.Unlock()
 	if o.events != nil {
-		*o.events = append(*o.events, o.name+":failure")
+		o.events.add(o.name + ":failure")
 	}
 }
 
 func (o *observerRecorder) ObserveReadiness(_ context.Context, event ReadinessEvent) {
+	o.mu.Lock()
 	o.readiness = append(o.readiness, event)
+	o.mu.Unlock()
 	if o.events != nil {
-		*o.events = append(*o.events, o.name+":readiness")
+		o.events.add(o.name + ":readiness")
+	}
+}
+
+type observerRecorderSnapshot struct {
+	transitions []TransitionEvent
+	starts      []CommandStartEvent
+	ends        []CommandEndEvent
+	failures    []FailureEvent
+	readiness   []ReadinessEvent
+}
+
+func (o *observerRecorder) snapshot() observerRecorderSnapshot {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return observerRecorderSnapshot{
+		transitions: append([]TransitionEvent(nil), o.transitions...),
+		starts:      append([]CommandStartEvent(nil), o.starts...),
+		ends:        append([]CommandEndEvent(nil), o.ends...),
+		failures:    append([]FailureEvent(nil), o.failures...),
+		readiness:   append([]ReadinessEvent(nil), o.readiness...),
 	}
 }
 
@@ -194,11 +255,13 @@ func TestMultiObserverContinuesAfterObserverPanic(t *testing.T) {
 	})
 	observation.End(context.Background(), CommandEndEvent{})
 
-	if first.starts != 1 || second.starts != 1 {
-		t.Fatalf("starts = first:%d second:%d, want 1 each", first.starts, second.starts)
+	firstStarts, firstEnds := first.counts()
+	secondStarts, secondEnds := second.counts()
+	if firstStarts != 1 || secondStarts != 1 {
+		t.Fatalf("starts = first:%d second:%d, want 1 each", firstStarts, secondStarts)
 	}
-	if first.ends != 1 || second.ends != 1 {
-		t.Fatalf("ends = first:%d second:%d, want 1 each", first.ends, second.ends)
+	if firstEnds != 1 || secondEnds != 1 {
+		t.Fatalf("ends = first:%d second:%d, want 1 each", firstEnds, secondEnds)
 	}
 }
 
@@ -226,25 +289,27 @@ func TestMultiObserverFansOutEventsAndRecoversPanics(t *testing.T) {
 	observer.ObserveFailure(context.Background(), failure)
 	observer.ObserveReadiness(context.Background(), readiness)
 
-	if len(first.transitions) != 1 || len(second.transitions) != 1 {
-		t.Fatalf("transition fanout = first:%d second:%d, want 1 each", len(first.transitions), len(second.transitions))
+	firstEvents := first.snapshot()
+	secondEvents := second.snapshot()
+	if len(firstEvents.transitions) != 1 || len(secondEvents.transitions) != 1 {
+		t.Fatalf("transition fanout = first:%d second:%d, want 1 each", len(firstEvents.transitions), len(secondEvents.transitions))
 	}
-	if len(first.failures) != 1 || len(second.failures) != 1 {
-		t.Fatalf("failure fanout = first:%d second:%d, want 1 each", len(first.failures), len(second.failures))
+	if len(firstEvents.failures) != 1 || len(secondEvents.failures) != 1 {
+		t.Fatalf("failure fanout = first:%d second:%d, want 1 each", len(firstEvents.failures), len(secondEvents.failures))
 	}
-	if len(first.readiness) != 1 || len(second.readiness) != 1 {
-		t.Fatalf("readiness fanout = first:%d second:%d, want 1 each", len(first.readiness), len(second.readiness))
+	if len(firstEvents.readiness) != 1 || len(secondEvents.readiness) != 1 {
+		t.Fatalf("readiness fanout = first:%d second:%d, want 1 each", len(firstEvents.readiness), len(secondEvents.readiness))
 	}
 }
 
 func TestMultiObserverStartCommandPropagatesDerivedContextAndEndsReverseOrder(t *testing.T) {
 	t.Parallel()
 
-	var events []string
+	events := &recordingEventLog{}
 	firstKey := contextKey("first")
 	secondKey := contextKey("second")
-	first := &observerRecorder{name: "first", events: &events, derivedKey: firstKey, derivedValue: "first-value"}
-	second := &observerRecorder{name: "second", events: &events, derivedKey: secondKey, derivedValue: "second-value"}
+	first := &observerRecorder{name: "first", events: events, derivedKey: firstKey, derivedValue: "first-value"}
+	second := &observerRecorder{name: "second", events: events, derivedKey: secondKey, derivedValue: "second-value"}
 
 	ctx, observation := MultiObserver(first, second).StartCommand(context.Background(), CommandStartEvent{
 		Runtime: "runtime",
@@ -260,8 +325,9 @@ func TestMultiObserverStartCommandPropagatesDerivedContextAndEndsReverseOrder(t 
 	observation.End(ctx, CommandEndEvent{Runtime: "runtime", Worker: "runtime/worker", Command: "command"})
 
 	want := []string{"first:start", "second:start", "second:end", "first:end"}
-	if !slices.Equal(events, want) {
-		t.Fatalf("events = %#v, want %#v", events, want)
+	gotEvents := events.snapshot()
+	if !slices.Equal(gotEvents, want) {
+		t.Fatalf("events = %#v, want %#v", gotEvents, want)
 	}
 }
 
@@ -277,11 +343,13 @@ func TestMultiObserverStartCommandHandlesNilContextAndObservation(t *testing.T) 
 		t.Fatalf("context value = %#v, want first-value", ctx.Value(firstKey))
 	}
 	observation.End(ctx, CommandEndEvent{})
-	if len(first.ends) != 1 {
-		t.Fatalf("first ends = %d, want 1", len(first.ends))
+	firstEvents := first.snapshot()
+	secondEvents := second.snapshot()
+	if len(firstEvents.ends) != 1 {
+		t.Fatalf("first ends = %d, want 1", len(firstEvents.ends))
 	}
-	if len(second.ends) != 0 {
-		t.Fatalf("second ends = %d, want 0", len(second.ends))
+	if len(secondEvents.ends) != 0 {
+		t.Fatalf("second ends = %d, want 0", len(secondEvents.ends))
 	}
 }
 
@@ -303,11 +371,13 @@ func TestMultiObserverEndsSuccessfullyStartedCommandObservationsAfterPanic(t *te
 	})
 	observation.End(context.Background(), CommandEndEvent{})
 
-	if first.starts != 1 || second.starts != 1 {
-		t.Fatalf("starts = first:%d second:%d, want 1 each", first.starts, second.starts)
+	firstStarts, firstEnds := first.counts()
+	secondStarts, secondEnds := second.counts()
+	if firstStarts != 1 || secondStarts != 1 {
+		t.Fatalf("starts = first:%d second:%d, want 1 each", firstStarts, secondStarts)
 	}
-	if first.ends != 1 || second.ends != 1 {
-		t.Fatalf("ends = first:%d second:%d, want 1 each", first.ends, second.ends)
+	if firstEnds != 1 || secondEnds != 1 {
+		t.Fatalf("ends = first:%d second:%d, want 1 each", firstEnds, secondEnds)
 	}
 }
 
@@ -367,5 +437,39 @@ func TestSafeObserverStartCommandUsesFallbacksForNilReturns(t *testing.T) {
 	}
 	if _, ok := observation.(NopCommandObservation); !ok {
 		t.Fatalf("observation = %T, want NopCommandObservation", observation)
+	}
+}
+
+func TestMultiObserverSupportsConcurrentCallbacks(t *testing.T) {
+	t.Parallel()
+
+	const calls = 32
+	first := &observerRecorder{name: "first"}
+	second := &observerRecorder{name: "second"}
+	observer := MultiObserver(first, second)
+
+	var wg sync.WaitGroup
+	for range calls {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, observation := observer.StartCommand(context.Background(), CommandStartEvent{})
+			observer.ObserveTransition(ctx, TransitionEvent{})
+			observer.ObserveFailure(ctx, FailureEvent{})
+			observer.ObserveReadiness(ctx, ReadinessEvent{})
+			observation.End(ctx, CommandEndEvent{})
+		}()
+	}
+	wg.Wait()
+
+	for name, events := range map[string]observerRecorderSnapshot{
+		"first":  first.snapshot(),
+		"second": second.snapshot(),
+	} {
+		if len(events.starts) != calls || len(events.ends) != calls ||
+			len(events.transitions) != calls || len(events.failures) != calls ||
+			len(events.readiness) != calls {
+			t.Fatalf("%s events = %#v, want %d of each callback", name, events, calls)
+		}
 	}
 }
