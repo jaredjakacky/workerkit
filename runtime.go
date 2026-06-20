@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	opskit "github.com/jaredjakacky/opskit"
 	retrykit "github.com/jaredjakacky/workerkit/retry"
 )
 
@@ -715,6 +716,10 @@ func (r *Runtime) Commands(worker string) ([]CommandInfo, bool) {
 			Worker:      reg.Worker,
 			Name:        reg.Name,
 			Description: reg.Description,
+			PayloadKind: reg.PayloadKind,
+			Dangerous:   reg.Dangerous,
+			Idempotent:  reg.Idempotent,
+			Attributes:  cloneCommandAttributes(reg.Attributes),
 		})
 	}
 
@@ -1388,6 +1393,10 @@ type commandRegistration struct {
 	Worker      string
 	Name        string
 	Description string
+	PayloadKind string
+	Dangerous   bool
+	Idempotent  bool
+	Attributes  []opskit.Attribute
 	Handler     CommandHandler
 }
 
@@ -1417,6 +1426,10 @@ func (r *Runtime) bindWorkerCommands(worker string, commands []CommandSpec) ([]c
 			Worker:      worker,
 			Name:        command.Name,
 			Description: command.Description,
+			PayloadKind: command.PayloadKind,
+			Dangerous:   command.Dangerous,
+			Idempotent:  command.Idempotent,
+			Attributes:  cloneCommandAttributes(command.Attributes),
 			Handler:     command.Handler,
 		})
 	}

@@ -53,6 +53,41 @@ runtime.Register(spec,
 )
 ```
 
+## Execute Opskit Commands
+
+Use `CommandFromOpskit` when a component already implements Opskit's command
+descriptor and handler contracts. Opskit defines these contracts but does not
+invoke the handler:
+
+```go
+runtime.Register(spec,
+	workerkit.WithCommandSpec(workerkit.CommandFromOpskit(
+		opskit.CommandDescriptor{
+			Name:        "cache/refresh",
+			Description: "refresh cache entries",
+			PayloadKind: "cache_refresh",
+			Idempotent:  true,
+		},
+		cache,
+	)),
+)
+```
+
+The adapter translates the request and marshals `opskit.CommandResult.Result`
+as JSON into Workerkit's result payload. It returns errors wrapping
+`ErrOpsCommandRejected` or `ErrOpsCommandFailed` for rejected and failed Opskit
+results. If the command context is canceled, the context error takes precedence.
+
+An accepted Opskit result, including `AcceptedCommand` for asynchronous work,
+is a successful Workerkit dispatch. Workerkit releases its in-flight slot when
+the handler returns; it does not track work that the Opskit handler continues in
+another goroutine or external system.
+
+Opskit descriptor metadata is available through Workerkit discovery.
+`Dangerous` and `Idempotent` are advisory: they do not authorize execution or
+enable retries. Authentication, authorization, and retry policy remain explicit
+application and Workerkit configuration.
+
 ## Discover Commands
 
 `Runtime.Commands` returns registered command metadata for one worker:
@@ -104,6 +139,12 @@ aggregate runtime status, the command handler can get the worker-scoped runtime
 handle with `WorkerRuntimeFromContext(ctx)` and call `ReportFailure(err)`.
 Returned command errors alone are recorded as command failures; they do not
 automatically move the worker lifecycle to failed.
+
+Opskit rejected and failed results become command handler errors through
+`CommandFromOpskit`, so they follow the same failure recording, observation,
+and configured retry path. A rejected result means the domain handler declined
+work after Workerkit admitted the dispatch; it is distinct from Workerkit's
+lifecycle and concurrency admission errors.
 
 An admitted command may call `ReportFailure` while Stop is running. Workerkit
 records that worker health failure without replacing the stopping lifecycle. A
@@ -161,6 +202,12 @@ runtime.Register(spec,
 
 Only retry commands that are safe to repeat. Use predicates to reject permanent
 failures.
+
+This is especially important for Opskit adapters: JSON result encoding happens
+after the domain handler returns. An encoding failure is reported as
+`ErrOpsCommandFailed` and may be retried by the configured policy even though
+the handler may already have produced side effects. The descriptor's
+`Idempotent` field is only metadata and does not alter retry behavior.
 
 Command timeouts are cooperative: handlers receive a context deadline and must
 observe `ctx.Done()` for timeout or cancellation to take effect.

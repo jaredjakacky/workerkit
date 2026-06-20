@@ -41,6 +41,8 @@ With one runtime, Workerkit gives you:
 - structured observer hooks
 - optional `slog` and OpenTelemetry adapters
 - Opskit component, readiness, and inspection support
+- periodic execution of Opskit check and check-group contracts
+- generic execution of Opskit command handlers
 - optional Servekit-backed Workerkit command and lifecycle routes
 
 This is the operational layer teams rebuild around serious worker components. Workerkit makes it the baseline instead of the afterthought.
@@ -231,6 +233,8 @@ Workerkit has a short normal path, but it is not limited to startup and shutdown
 - panic recovery or crash policy
 - isolated, unready, or failed aggregate runtime failure policy
 - worker-owned command discovery and dispatch
+- Opskit checker and check-group execution through managed workers
+- Opskit command-handler execution through `CommandFromOpskit`
 - structured `slog` observer support
 - OpenTelemetry observer support
 - Opskit-backed readiness and generic admin inspection through Servekit
@@ -243,7 +247,9 @@ The advanced path is documented in [docs/advanced.md](docs/advanced.md), with po
 
 Workerkit, Opskit, and [Servekit](https://github.com/jaredjakacky/servekit) can be used independently. The preferred composed path is:
 
+- Opskit defines passive component metadata/read models plus explicit check and command execution hooks. Opskit does not schedule or invoke those hooks.
 - Workerkit runtime implements Opskit component, readiness, and inspection contracts.
+- Workerkit executes active Opskit work through `NewCheckLoop`, `NewCheckGroupLoop`, and `CommandFromOpskit`.
 - The application registers the runtime in an Opskit registry.
 - Servekit consumes that registry with `servekit.WithOps(...)`.
 - Servekit presents `/readyz` and generic Opskit admin routes.
@@ -267,68 +273,39 @@ server := servekit.New(
 
 This gives Servekit a pod-local view of the Workerkit runtime. It reports only the runtime state inside this process; it is not a fleet-wide worker registry or distributed control plane.
 
-`opshttp` is still useful when you need Workerkit-specific HTTP operations, especially command dispatch or privileged lifecycle controls. It is no longer the primary read-only/readiness integration path for composed Kit Series services.
+Active Opskit contracts enter the same Workerkit execution model as native work:
 
 ```go
-server := servekit.New(
-    servekit.WithAddr(":8080"),
-    servekit.WithOps(ops, servekit.WithOpsAdmin()),
-)
+if err := runtime.Register(workerkit.WorkerSpec{
+    Name:   "dependency_checks",
+    Worker: workerkit.NewCheckLoop(dependency),
+}); err != nil {
+    return err
+}
 
-err := opshttp.Mount(server, runtime,
-    opshttp.WithEndpointOptions(
-        servekit.WithAuthGate(requireOpsCaller),
-        servekit.WithEndpointTimeout(10*time.Second),
+if err := runtime.Register(commandWorker,
+    workerkit.WithCommandSpec(
+        workerkit.CommandFromOpskit(commandDescriptor, component),
     ),
-    opshttp.WithCommandDispatchEnabled(),
-    opshttp.WithDispatchOptions(
-        servekit.WithBodyLimit(1 << 20),
-    ),
-)
+); err != nil {
+    return err
+}
 ```
 
-The standalone `opshttp.ReadinessCheck(runtime)` adapter remains available for services that use Servekit readiness checks without an Opskit registry.
+`NewCheckLoop` and `NewCheckGroupLoop` return normal Workerkit workers. Workerkit owns their interval, jitter, cooperative timeout, cancellation, panic recovery, and readiness/failure integration. `CommandFromOpskit` returns a normal command spec, so dispatch keeps Workerkit admission, timeout, retry, concurrency, panic, observation, and lifecycle behavior.
 
-By default, `opshttp.Mount` still exposes read-only Workerkit-specific operations routes:
+`opshttp` is an optional Workerkit-specific HTTP control surface. It is useful when operators specifically need Workerkit command dispatch or privileged lifecycle controls; it is not the primary read-only/readiness composition path. Mutating routes are disabled unless explicitly enabled.
 
-- `GET /admin/runtime` returns runtime identity and aggregate status
-- `GET /admin/workers` returns worker snapshots
-- `GET /admin/worker?name=runtime/worker` returns one worker snapshot
-- `GET /admin/commands?worker=runtime/worker` returns worker-owned command discovery
+`opshttp.Mount` adds Workerkit-shaped read-only inspection by default. Command
+dispatch and lifecycle controls require explicit options. Even read-only routes
+expose operational state, so protect the entire mounted surface; use stricter
+Servekit endpoint policy for mutating routes. HTTP controls are pod-local, and
+stop routes do not wait for commands already in flight.
 
-Even the read-only routes expose operational state, worker names, command inventory, and failure information, so mount them only on an appropriate operations surface.
+The standalone `opshttp.ReadinessCheck(runtime)` adapter remains available only for standalone Servekit services that do not use an Opskit registry.
 
-Command dispatch is intentionally opt-in because it can trigger domain work or mutate worker state:
-
-- `POST /admin/commands/dispatch` dispatches a worker-owned command when `opshttp.WithCommandDispatchEnabled()` is enabled
-
-Privileged lifecycle controls are also opt-in because they can start, drain, and stop workers through HTTP:
-
-- `POST /admin/workers/start`
-- `POST /admin/workers/drain`
-- `POST /admin/workers/stop`
-- `POST /admin/runtime/start`
-- `POST /admin/runtime/drain`
-- `POST /admin/runtime/stop`
-
-Enable lifecycle controls with `opshttp.WithAdminLifecycleControlsEnabled()` and protect them with authentication, authorization, and audit middleware appropriate for the deployment.
-
-The worker and runtime stop routes are immediate: they close command admission
-but do not wait for or cancel commands already in flight. For graceful command
-completion over HTTP, drain, poll runtime or worker status until `inFlight` is
-zero, then stop.
-
-The route prefix defaults to `/admin` and can be changed with `opshttp.WithPrefix`. Common Servekit endpoint options can be applied to every mounted route with `opshttp.WithEndpointOptions`. Stricter policy can be applied only to command dispatch routes with `opshttp.WithDispatchOptions`, and only to lifecycle control routes with `opshttp.WithLifecycleOptions`.
-
-Command dispatch accepts raw JSON payloads and passes those bytes to `workerkit.CommandRequest.Payload`. Command responses expose `workerkit.CommandResult.Payload` as raw JSON. Workerkit does not interpret either payload; the worker owns the command contract.
-
-`opshttp` provides stable HTTP meanings for Workerkit command dispatch failures:
-
-- malformed command requests return `400 Bad Request`
-- missing workers or commands return `404 Not Found`
-- runtime not accepting work returns `503 Service Unavailable`
-- worker not accepting work or invalid worker state returns `409 Conflict`
-- runtime or worker saturation returns `429 Too Many Requests`
+See [Composition with Opskit and Servekit](docs/composition.md) and the optional
+`opshttp` examples for route inventory, endpoint policy, and error mappings.
 
 ## Documentation
 
@@ -354,18 +331,22 @@ Recommended reading order:
 2. [`examples/loop-worker`](examples/loop-worker)
 3. [`examples/readiness`](examples/readiness)
 4. [`examples/commands`](examples/commands)
-5. [`examples/retry-policy`](examples/retry-policy)
-6. [`examples/concurrency-limits`](examples/concurrency-limits)
-7. [`examples/failure-policy`](examples/failure-policy)
-8. [`examples/multi-worker`](examples/multi-worker)
-9. [`examples/testing`](examples/testing)
-10. [`examples/observability-slog`](examples/observability-slog)
-11. [`examples/observability-otel`](examples/observability-otel)
-12. [`examples/managed-service`](examples/managed-service)
-13. [`examples/opshttp-basic`](examples/opshttp-basic)
-14. [`examples/opshttp-commands`](examples/opshttp-commands)
-15. [`examples/admin-lifecycle`](examples/admin-lifecycle)
-16. [`examples/production-composition`](examples/production-composition)
+5. [`examples/opskit-checks`](examples/opskit-checks)
+6. [`examples/opskit-command`](examples/opskit-command)
+7. [`examples/retry-policy`](examples/retry-policy)
+8. [`examples/concurrency-limits`](examples/concurrency-limits)
+9. [`examples/failure-policy`](examples/failure-policy)
+10. [`examples/multi-worker`](examples/multi-worker)
+11. [`examples/testing`](examples/testing)
+12. [`examples/observability-slog`](examples/observability-slog)
+13. [`examples/observability-otel`](examples/observability-otel)
+14. [`examples/managed-service`](examples/managed-service)
+15. [`examples/production-composition`](examples/production-composition)
+
+Optional Workerkit-specific HTTP controls are demonstrated separately in
+[`examples/opshttp-basic`](examples/opshttp-basic),
+[`examples/opshttp-commands`](examples/opshttp-commands), and
+[`examples/admin-lifecycle`](examples/admin-lifecycle).
 
 ## API Reference
 

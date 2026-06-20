@@ -218,6 +218,30 @@ status:
 
 Read [`policy.md`](policy.md) for policy guidance.
 
+## Opskit Check Workers
+
+`NewCheckLoop` and `NewCheckGroupLoop` adapt Opskit execution hooks into normal
+Workerkit workers. Starting the worker starts periodic execution; draining
+closes Workerkit command admission but does not stop the loop; stopping the
+worker cancels the loop context and waits for the active check to return.
+
+Workerkit owns interval timing, initial delay, jitter, cooperative per-check
+timeouts, cancellation, panic recovery, readiness updates, and optional failure
+reporting. Opskit defines the check contracts but does not schedule them. The
+checked component owns check meaning and any cached component health exposed
+through Opskit status or readiness.
+
+Ready and not-ready results update the check worker's readiness by default. A
+not-ready result does not stop the loop unless
+`WithCheckReportFailureOnNotReady(true)` is configured. Panics fail the loop
+through Workerkit's normal failure path. A checker that ignores `ctx.Done()`
+cannot be forcibly interrupted by either timeout or Stop.
+
+If both the checked component and its check worker participate in aggregate
+readiness, choose their policies deliberately to avoid counting one dependency
+twice. `WithCheckResultObserver` and `WithCheckSummaryObserver` can retain
+result detail that is not represented in Workerkit's boolean worker readiness.
+
 ## Servekit Readiness
 
 Workerkit readiness is transport-neutral. In the composed Kit Series path,
@@ -239,5 +263,6 @@ That keeps the boundary clear:
 ## Examples
 
 - [`examples/readiness`](../examples/readiness)
+- [`examples/opskit-checks`](../examples/opskit-checks)
 - [`examples/failure-policy`](../examples/failure-policy)
 - [`examples/managed-service`](../examples/managed-service)

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	opskit "github.com/jaredjakacky/opskit"
 	"github.com/jaredjakacky/servekit"
 	workerkit "github.com/jaredjakacky/workerkit"
 )
@@ -96,6 +97,29 @@ func TestDispatchRejectsInvalidCommandRequest(t *testing.T) {
 	rec := postDispatch(t, server, `{"worker":"worker","name":"Bad Command"}`)
 	assertStatus(t, rec, http.StatusBadRequest)
 	assertErrorBody(t, rec, "invalid command name")
+}
+
+func TestDispatchMapsOpskitCommandOutcomes(t *testing.T) {
+	tests := []struct {
+		name       string
+		result     opskit.CommandResult
+		wantStatus int
+		wantError  string
+	}{
+		{name: "rejected", result: opskit.RejectedCommand("maintenance disabled"), wantStatus: http.StatusConflict, wantError: workerkit.ErrOpsCommandRejected.Error()},
+		{name: "failed", result: opskit.FailedCommand("refresh failed", errors.New("backend unavailable"), 0), wantStatus: http.StatusInternalServerError, wantError: "internal server error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := workerkit.CommandFromOpskit(opskit.CommandDescriptor{Name: "echo"}, opskit.CommandHandlerFunc(
+				func(context.Context, opskit.CommandRequest) opskit.CommandResult { return tt.result },
+			))
+			server := newDispatchServer(t, spec.Handler)
+			rec := postDispatch(t, server, `{"worker":"worker","name":"echo"}`)
+			assertStatus(t, rec, tt.wantStatus)
+			assertErrorBody(t, rec, tt.wantError)
+		})
+	}
 }
 
 func TestDispatchMapsAdmissionErrors(t *testing.T) {

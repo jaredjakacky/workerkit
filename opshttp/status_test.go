@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"testing"
 
+	opskit "github.com/jaredjakacky/opskit"
 	"github.com/jaredjakacky/servekit"
 	workerkit "github.com/jaredjakacky/workerkit"
 )
@@ -119,6 +120,12 @@ func TestStatusCommandsRoute(t *testing.T) {
 	if body.Data[1].Description != "last command" {
 		t.Fatalf("second description = %q, want last command", body.Data[1].Description)
 	}
+	if body.Data[1].PayloadKind != "maintenance" || !body.Data[1].Dangerous || !body.Data[1].Idempotent {
+		t.Fatalf("second metadata = %#v, want Opskit command metadata", body.Data[1])
+	}
+	if len(body.Data[1].Attributes) != 1 || body.Data[1].Attributes[0] != opskit.Attr("scope", "cache") {
+		t.Fatalf("second attributes = %#v, want scope=cache", body.Data[1].Attributes)
+	}
 
 	rec = serveHTTP(server, http.MethodGet, "/admin/commands?worker=missing", "")
 	assertStatus(t, rec, http.StatusNotFound)
@@ -145,6 +152,10 @@ func newStatusRuntime(t *testing.T) *workerkit.Runtime {
 		workerkit.WithCommandSpec(workerkit.CommandSpec{
 			Name:        "z-command",
 			Description: "last command",
+			PayloadKind: "maintenance",
+			Dangerous:   true,
+			Idempotent:  true,
+			Attributes:  []opskit.Attribute{opskit.Attr("scope", "cache")},
 			Handler:     nopCommandHandler,
 		}),
 		workerkit.WithCommandSpec(workerkit.CommandSpec{
