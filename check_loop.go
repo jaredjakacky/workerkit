@@ -87,8 +87,10 @@ func WithCheckRunImmediately(enabled bool) CheckLoopOption {
 	}
 }
 
-// WithCheckTimeout sets a per-execution timeout. A non-positive timeout means
-// executions use only the loop context cancellation.
+// WithCheckTimeout sets a per-execution timeout. The deadline is cooperative:
+// Workerkit cannot interrupt a checker that ignores ctx.Done(). A result
+// returned after the deadline is not applied to readiness. A non-positive
+// timeout means executions use only the loop context cancellation.
 func WithCheckTimeout(timeout time.Duration) CheckLoopOption {
 	return func(cfg *checkLoopConfig) {
 		cfg.timeout = timeout
@@ -111,23 +113,25 @@ func WithCheckReadyOnSuccess(enabled bool) CheckLoopOption {
 	}
 }
 
-// WithCheckReportFailureOnNotReady controls whether not-ready check results are
-// also reported as Workerkit worker failures and stop the check loop. Disabled
-// by default.
+// WithCheckReportFailureOnNotReady controls whether not-ready check results and
+// per-execution timeouts are also reported as Workerkit worker failures and
+// stop the check loop. Disabled by default.
 func WithCheckReportFailureOnNotReady(enabled bool) CheckLoopOption {
 	return func(cfg *checkLoopConfig) {
 		cfg.reportFailureOnNotReady = enabled
 	}
 }
 
-// WithCheckResultObserver observes completed single-check results.
+// WithCheckResultObserver observes completed single-check results, including
+// late results that Workerkit does not apply after a check timeout.
 func WithCheckResultObserver(observer CheckResultObserver) CheckLoopOption {
 	return func(cfg *checkLoopConfig) {
 		cfg.resultObserver = observer
 	}
 }
 
-// WithCheckSummaryObserver observes completed check-group summaries.
+// WithCheckSummaryObserver observes completed check-group summaries, including
+// late summaries that Workerkit does not apply after a check timeout.
 func WithCheckSummaryObserver(observer CheckSummaryObserver) CheckLoopOption {
 	return func(cfg *checkLoopConfig) {
 		cfg.summaryObserver = observer
@@ -248,11 +252,23 @@ func runCheckLoopOnce(ctx context.Context, runtime WorkerRuntime, cfg checkLoopC
 	defer cancel()
 
 	outcome := run(checkCtx)
-	if checkCtx.Err() != nil && ctx.Err() != nil {
-		return ctx.Err()
+	checkErr := checkCtx.Err()
+	if parentErr := ctx.Err(); parentErr != nil {
+		return parentErr
 	}
-	if err := ctx.Err(); err != nil {
-		return err
+	if checkErr != nil {
+		if cfg.readyOnSuccess {
+			if err := runtime.SetReady(false); err != nil {
+				return err
+			}
+		}
+		if cfg.reportFailureOnNotReady {
+			if err := runtime.ReportFailure(checkErr); err != nil {
+				return err
+			}
+			return checkErr
+		}
+		return nil
 	}
 
 	if cfg.readyOnSuccess {

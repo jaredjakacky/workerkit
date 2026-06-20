@@ -86,7 +86,11 @@ required readiness signal and the other is optional or informational; making
 both required can duplicate the same dependency gate.
 
 Check timeouts are cooperative and cannot interrupt implementations that ignore
-context cancellation. Group-worker readiness contains only the aggregate
+context cancellation, but results returned after the deadline are not applied
+to readiness. When readiness management is enabled, the worker becomes unready
+and the loop continues unless failure-on-not-ready is enabled. Result and
+summary observers still receive the completed late value. Group-worker
+readiness contains only the aggregate
 summary; retain per-check detail in the checked component or through
 `WithCheckSummaryObserver`.
 

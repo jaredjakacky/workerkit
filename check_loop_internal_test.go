@@ -110,6 +110,58 @@ func TestRunCheckLoopOnceUsesConfiguredPanicContext(t *testing.T) {
 	}
 }
 
+func TestRunCheckLoopOnceRejectsReadyResultAfterTimeout(t *testing.T) {
+	t.Parallel()
+
+	runtime := &checkLoopRuntime{ready: true}
+	err := runCheckLoopOnce(
+		context.Background(),
+		runtime,
+		checkLoopConfig{timeout: time.Millisecond, readyOnSuccess: true},
+		func(ctx context.Context) checkLoopOutcome {
+			<-ctx.Done()
+			return checkLoopOutcome{ready: true, state: opskit.StateReady}
+		},
+	)
+	if err != nil {
+		t.Fatalf("runCheckLoopOnce error = %v", err)
+	}
+	if runtime.ready {
+		t.Fatal("ready = true, want false after timed-out check")
+	}
+	if runtime.reportFailure != nil {
+		t.Fatalf("ReportFailure error = %v, want nil", runtime.reportFailure)
+	}
+}
+
+func TestRunCheckLoopOnceReportsTimeoutWhenConfigured(t *testing.T) {
+	t.Parallel()
+
+	runtime := &checkLoopRuntime{ready: true}
+	err := runCheckLoopOnce(
+		context.Background(),
+		runtime,
+		checkLoopConfig{
+			timeout:                 time.Millisecond,
+			readyOnSuccess:          true,
+			reportFailureOnNotReady: true,
+		},
+		func(ctx context.Context) checkLoopOutcome {
+			<-ctx.Done()
+			return checkLoopOutcome{ready: true, state: opskit.StateReady}
+		},
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runCheckLoopOnce error = %v, want context.DeadlineExceeded", err)
+	}
+	if runtime.ready {
+		t.Fatal("ready = true, want false after timed-out check")
+	}
+	if !errors.Is(runtime.reportFailure, context.DeadlineExceeded) {
+		t.Fatalf("ReportFailure error = %v, want context.DeadlineExceeded", runtime.reportFailure)
+	}
+}
+
 type checkLoopRuntime struct {
 	setReadyErr      error
 	reportFailureErr error

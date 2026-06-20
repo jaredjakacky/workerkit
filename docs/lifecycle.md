@@ -235,12 +235,19 @@ Ready and not-ready results update the check worker's readiness by default. A
 not-ready result does not stop the loop unless
 `WithCheckReportFailureOnNotReady(true)` is configured. Panics fail the loop
 through Workerkit's normal failure path. A checker that ignores `ctx.Done()`
-cannot be forcibly interrupted by either timeout or Stop.
+cannot be forcibly interrupted by either timeout or Stop. Once it returns,
+Workerkit rejects a result produced after the check deadline and marks the
+worker unready when readiness management is enabled. The loop continues with
+later checks by default. When
+`WithCheckReportFailureOnNotReady(true)` is enabled, the deadline error is
+reported and stops the loop instead.
 
 If both the checked component and its check worker participate in aggregate
 readiness, choose their policies deliberately to avoid counting one dependency
 twice. `WithCheckResultObserver` and `WithCheckSummaryObserver` can retain
 result detail that is not represented in Workerkit's boolean worker readiness.
+Observers receive every completed result or summary, including a late value
+that Workerkit rejects for readiness after its deadline.
 
 ## Servekit Readiness
 
