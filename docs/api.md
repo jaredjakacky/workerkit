@@ -563,7 +563,9 @@ them. These constructors adapt those hooks into ordinary Workerkit workers.
 
 - `WithCheckTimeout(...)`
 
-  Sets a per-execution timeout.
+  Sets a cooperative per-execution deadline. Workerkit cannot interrupt a
+  checker that ignores cancellation, but it does not apply results returned
+  after the deadline to worker readiness.
 
 - `WithCheckJitter(...)`
 
@@ -576,8 +578,9 @@ them. These constructors adapt those hooks into ordinary Workerkit workers.
 
 - `WithCheckReportFailureOnNotReady(...)`
 
-  Controls whether not-ready check results are also reported as Workerkit worker
-  failures and stop the check loop. Disabled by default.
+  Controls whether not-ready check results and per-execution timeouts are also
+  reported as Workerkit worker failures and stop the check loop. Disabled by
+  default.
 
 - `WithCheckResultObserver(...)`
 

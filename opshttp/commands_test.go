@@ -107,6 +107,7 @@ func TestDispatchMapsOpskitCommandOutcomes(t *testing.T) {
 		wantError  string
 	}{
 		{name: "rejected", result: opskit.RejectedCommand("maintenance disabled"), wantStatus: http.StatusConflict, wantError: workerkit.ErrOpsCommandRejected.Error()},
+		{name: "rejected with error detail", result: opskit.CommandResult{State: opskit.StateNotReady, Accepted: false, Error: "maintenance disabled"}, wantStatus: http.StatusConflict, wantError: workerkit.ErrOpsCommandRejected.Error()},
 		{name: "failed", result: opskit.FailedCommand("refresh failed", errors.New("backend unavailable"), 0), wantStatus: http.StatusInternalServerError, wantError: "internal server error"},
 	}
 	for _, tt := range tests {

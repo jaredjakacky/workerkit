@@ -236,6 +236,7 @@ func TestCommandFromOpskitMapsOutcomes(t *testing.T) {
 		wantErr error
 	}{
 		{name: "rejected", result: opskit.RejectedCommand("disabled"), wantErr: ErrOpsCommandRejected},
+		{name: "rejected with error detail", result: opskit.CommandResult{State: opskit.StateNotReady, Accepted: false, Error: "disabled"}, wantErr: ErrOpsCommandRejected},
 		{name: "failed", result: opskit.FailedCommand("refresh failed", errors.New("backend unavailable"), 0), wantErr: ErrOpsCommandFailed},
 		{name: "error text implies failure", result: opskit.CommandResult{State: opskit.StateReady, Accepted: true, Error: "inconsistent failure"}, wantErr: ErrOpsCommandFailed},
 	}

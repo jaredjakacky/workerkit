@@ -167,11 +167,14 @@ func (h opskitCommandHandler) HandleCommand(ctx context.Context, req CommandRequ
 	if err := ctx.Err(); err != nil {
 		return CommandResult{}, err
 	}
-	if result.State == opskit.StateFailed || result.Error != "" {
+	if result.State == opskit.StateFailed {
 		return CommandResult{}, newOpskitCommandError(ErrOpsCommandFailed, result)
 	}
 	if !result.Accepted {
 		return CommandResult{}, newOpskitCommandError(ErrOpsCommandRejected, result)
+	}
+	if result.Error != "" {
+		return CommandResult{}, newOpskitCommandError(ErrOpsCommandFailed, result)
 	}
 
 	var payload []byte
