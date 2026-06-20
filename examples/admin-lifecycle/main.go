@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	opskit "github.com/jaredjakacky/opskit"
 	"github.com/jaredjakacky/servekit"
 	workerkit "github.com/jaredjakacky/workerkit"
 	"github.com/jaredjakacky/workerkit/opshttp"
@@ -35,9 +36,11 @@ func main() {
 		}
 	}
 
+	ops := opskit.NewRegistry()
+	ops.MustRegister(runtime, opskit.Required())
 	server := servekit.New(
 		servekit.WithAddr(":8080"),
-		servekit.WithReadinessChecks(opshttp.ReadinessCheck(runtime)),
+		servekit.WithOps(ops),
 	)
 
 	// Servekit owns endpoint policy here: authentication, authorization,

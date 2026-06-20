@@ -108,6 +108,8 @@ func mapDispatchError(runtime *workerkit.Runtime, workerName, commandName string
 		return servekit.Error(http.StatusConflict, err.Error(), err)
 	case errors.Is(err, workerkit.ErrRuntimeSaturated), errors.Is(err, workerkit.ErrWorkerSaturated):
 		return servekit.Error(http.StatusTooManyRequests, err.Error(), err)
+	case errors.Is(err, workerkit.ErrOpsCommandRejected):
+		return servekit.Error(http.StatusConflict, err.Error(), err)
 	case containsWorker(workerName, runtime):
 		// If the runtime did not expose a sentinel error, preserve lookup
 		// semantics before returning the original error.

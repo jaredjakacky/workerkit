@@ -2,8 +2,8 @@
 
 Workerkit's examples are a guided product tour, not a random pile of demos.
 Start with the smallest useful runtime, then move outward into managed loops,
-readiness, commands, execution policy, observability, and Servekit-backed
-operations.
+readiness, Opskit execution hooks, commands, execution policy, observability,
+Servekit presentation, and optional Workerkit-specific HTTP controls.
 
 If you want the short directory index instead, use
 [Workerkit Examples](../examples/README.md).
@@ -110,6 +110,52 @@ and domain meaning.
 
 **What this example intentionally does not show:** HTTP command dispatch,
 Servekit, retry, or lifecycle controls.
+
+### [`examples/opskit-checks`](../examples/opskit-checks)
+
+**What it demonstrates:** Workerkit periodically executing generic Opskit
+`Checker` and `CheckGroup` hooks as managed workers.
+
+**Run it:**
+
+```bash
+go run ./examples/opskit-checks
+```
+
+**Expected output:** The single check and grouped checks run immediately, their
+observers print results, and the passive Opskit registry reports component and
+runtime state.
+
+**What to notice:** Opskit defines the contracts and stores passive component
+inventory. Workerkit owns scheduling, timeout, cancellation, panic recovery,
+and readiness integration. Checked components are informational in the Opskit
+registry, and the group worker does not contribute to Workerkit readiness, so
+the database is not counted as a readiness gate multiple times.
+
+**What this example intentionally does not show:** Servekit presentation,
+external dependencies, retry, or checks that ignore context cancellation.
+
+### [`examples/opskit-command`](../examples/opskit-command)
+
+**What it demonstrates:** Executing an `opskit.CommandHandler` through the
+generic `workerkit.CommandFromOpskit` adapter.
+
+**Run it:**
+
+```bash
+go run ./examples/opskit-command
+```
+
+**Expected output:** The example prints Opskit descriptor metadata discovered
+through Workerkit, then dispatches an Opskit command and prints its structured
+result as a JSON Workerkit payload.
+
+**What to notice:** Opskit defines the command descriptor and handler hook but
+does not invoke it. Workerkit owns registration, admission, execution policy,
+and observation. No domain-specific Workerkit adapter is required.
+
+**What this example intentionally does not show:** HTTP presentation, retries,
+or asynchronous accepted work.
 
 ### [`examples/retry-policy`](../examples/retry-policy)
 
@@ -309,13 +355,18 @@ only on an appropriate operations surface.
 **What this example intentionally does not show:** Read-only ops routes,
 command dispatch, lifecycle controls, or custom ops endpoint policy.
 
-## Servekit-backed operations
+## Optional Workerkit HTTP controls
+
+The following examples are intentionally outside the primary composition
+progression. Use them when operators need Workerkit-specific inspection,
+command dispatch, or privileged lifecycle controls. Generic readiness still
+flows from the Opskit registry into Servekit.
 
 ### [`examples/opshttp-basic`](../examples/opshttp-basic)
 
-**What it demonstrates:** Standalone Workerkit-to-Servekit read-only operations
-routes through `opshttp`. In composed Kit Series services, prefer Opskit admin
-component routes for generic read-only inspection.
+**What it demonstrates:** Workerkit-specific read-only operations routes through
+`opshttp`. In composed Kit Series services, prefer Opskit admin component routes
+for generic read-only inspection.
 
 **Run it:**
 
@@ -344,7 +395,7 @@ curl -i http://localhost:8080/readyz
 **Expected output:** The program prints the same curl commands at startup.
 Read-only routes return runtime status, worker inspection, and command
 discovery. `/readyz` reflects Workerkit runtime readiness through the
-standalone Servekit readiness adapter.
+Opskit registry.
 
 **What to notice:** Workerkit owns runtime status and readiness semantics.
 Servekit owns HTTP routing, readiness endpoints, and endpoint policy. Opskit is
@@ -483,6 +534,8 @@ timeouts.
 **What this example intentionally does not show:** Normal application routes,
 command dispatch, or production authz.
 
+## Full Kit Series composition
+
 ### [`examples/production-composition`](../examples/production-composition)
 
 **What it demonstrates:** The flagship Kit Series composition in one copyable
@@ -508,8 +561,6 @@ serving, app routes, readiness endpoints, endpoint policy, and shutdown.
 - `GET /admin/components`
 - `GET /admin/components/catalog_service`
 - `POST /admin/commands/dispatch`
-- `POST /admin/runtime/drain`
-- privileged worker/runtime lifecycle routes
 
 **Curl commands:**
 
@@ -526,8 +577,6 @@ curl -i -X POST http://localhost:8080/admin/commands/dispatch \
   -H 'Content-Type: application/json' \
   -H 'X-Ops-Token: dev-secret' \
   -d '{"worker":"index","name":"index/rebuild"}'
-curl -i -X POST http://localhost:8080/admin/runtime/drain \
-  -H 'X-Ops-Token: dev-secret'
 ```
 
 **Expected output:** Workers warm up, structured logs describe runtime and
@@ -537,13 +586,13 @@ responses; missing or wrong `X-Ops-Token` values return `401`.
 
 **What to notice:** This is the full boundary story. Workerkit owns worker
 semantics; Opskit owns the shared operational registry contract; Servekit owns
-HTTP and service semantics. `opshttp` is used only for Workerkit-specific
-mutating operations.
+HTTP and service semantics. `opshttp` is used only for explicitly enabled
+command dispatch; privileged lifecycle controls remain disabled.
 
 In Kubernetes, these routes are pod-local. `/admin/components/catalog_service`
-shows the runtime in the pod that handled the request, and
-`/admin/runtime/drain` drains workers only in that pod unless you route directly
-to a specific replica or build a separate control plane.
+shows the runtime in the pod that handled the request, and command dispatch
+affects only that pod unless you route directly to a specific replica or build a
+separate control plane.
 
 **Security note:** The token gate and audit middleware are placeholders.
 Production deployments must use real authentication, authorization, audit

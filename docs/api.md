@@ -13,7 +13,9 @@ If you only remember the common path, remember this:
 - `StartAll(...)` and `Shutdown(...)` cover the core runtime lifecycle
 - `servekitservice.NewManaged(...)` wires Workerkit into the common Servekit service lifecycle
 - `WithCommand(...)` and `WithCommandSpec(...)` expose worker-owned operations
-- `opshttp.Mount(...)` adds an optional Servekit-backed operations plane
+- `NewCheckLoop(...)`, `NewCheckGroupLoop(...)`, and `CommandFromOpskit(...)` execute active Opskit work
+- `servekit.WithOps(...)` presents shared Opskit state through Servekit
+- `opshttp.Mount(...)` optionally adds Workerkit-specific HTTP controls
 
 Everything else in this file exists to customize that path without turning workers into a framework-specific application model.
 
@@ -122,7 +124,7 @@ Everything else in this file exists to customize that path without turning worke
 
 - `CommandSpec`
 
-  Full command registration shape with name, optional description, and handler. Use this when command discovery should be useful to operators.
+  Full command registration shape with name, description, Opskit-compatible advisory metadata, and handler. Use this when command discovery should be useful to operators.
 
 - `CommandSpec.Validate()`
 
@@ -135,6 +137,18 @@ Everything else in this file exists to customize that path without turning worke
 - `WithCommandSpec(...)`
 
   Registers one full `CommandSpec`, including optional discovery text.
+
+- `CommandFromOpskit(...)`
+
+  Adapts one `opskit.CommandDescriptor` and `opskit.CommandHandler` into a normal `CommandSpec`. Opskit results are JSON-encoded into Workerkit payloads and execute under Workerkit's existing policy.
+
+- `ErrOpsCommandRejected`
+
+  Identifies an Opskit result that did not accept the command.
+
+- `ErrOpsCommandFailed`
+
+  Identifies an Opskit failed result, explicit result error text, or result encoding failure.
 
 - `CommandHandler`
 
@@ -513,6 +527,9 @@ Default worker options are copied into each worker when it is registered. Later 
   Reports that `Start` found an existing loop lifecycle in progress.
 
 ### Opskit check loops
+
+Opskit defines check and check-group execution hooks but does not schedule
+them. These constructors adapt those hooks into ordinary Workerkit workers.
 
 - `NewCheckLoop(...)`
 
@@ -943,6 +960,10 @@ If you are new to the codebase:
 1. [README](../README.md)
 2. API Map
 3. [Examples Directory](../examples/README.md)
-4. [`examples/managed-service`](../examples/managed-service)
-5. [`examples/opshttp-basic`](../examples/opshttp-basic)
-6. [`examples/production-composition`](../examples/production-composition)
+4. [`examples/opskit-checks`](../examples/opskit-checks)
+5. [`examples/opskit-command`](../examples/opskit-command)
+6. [`examples/managed-service`](../examples/managed-service)
+7. [`examples/production-composition`](../examples/production-composition)
+
+Read the `opshttp` examples separately when Workerkit-specific HTTP controls
+are relevant to the deployment.

@@ -83,19 +83,15 @@ func main() {
 		),
 	)
 
-	// Opskit is the primary read-only integration path. opshttp remains useful
-	// for Workerkit-specific mutating operations such as command dispatch and
-	// privileged lifecycle controls.
+	// Opskit is the primary read-only integration path. This example opts into
+	// command dispatch, but leaves privileged lifecycle controls disabled.
 	opsOptions := []opshttp.Option{
-		// Apply the shared operations policy to every /admin route, including
-		// command and lifecycle routes, because they expose or mutate operational state.
+		// Apply the shared operations policy to every Workerkit-specific route.
 		opshttp.WithEndpointOptions(opsPolicy...),
 		opshttp.WithCommandDispatchEnabled(),
-		opshttp.WithAdminLifecycleControlsEnabled(),
-		// Mutating operations routes are intentionally opt-in and should be protected
-		// with real authentication, authorization, and audit logging in production.
+		// Command dispatch is intentionally opt-in and should be protected with real
+		// authentication, authorization, and audit logging in production.
 		opshttp.WithDispatchOptions(mutatingOpsPolicy...),
-		opshttp.WithLifecycleOptions(mutatingOpsPolicy...),
 	}
 
 	service, err := servekitservice.New(runtime, server,
@@ -388,5 +384,5 @@ func printCurlCommands() {
 	fmt.Println("  curl -s -H 'X-Ops-Token: dev-secret' http://localhost:8080/admin/components/catalog_service")
 	fmt.Println(`  curl -i -X POST http://localhost:8080/admin/commands/dispatch -H 'Content-Type: application/json' -H 'X-Ops-Token: dev-secret' -d '{"worker":"ingest","name":"ingest/enqueue","payload":{"documentID":"doc-123","title":"Workerkit"}}'`)
 	fmt.Println(`  curl -i -X POST http://localhost:8080/admin/commands/dispatch -H 'Content-Type: application/json' -H 'X-Ops-Token: dev-secret' -d '{"worker":"index","name":"index/rebuild"}'`)
-	fmt.Println(`  curl -i -X POST http://localhost:8080/admin/runtime/drain -H 'X-Ops-Token: dev-secret'`)
+	fmt.Println("privileged lifecycle controls are intentionally not enabled")
 }

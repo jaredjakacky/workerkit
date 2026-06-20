@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	opskit "github.com/jaredjakacky/opskit"
 	retrykit "github.com/jaredjakacky/workerkit/retry"
 )
 
@@ -427,6 +428,46 @@ func TestCommandRetryEmitsFailurePerFailedAttemptAndSuccessfulCommandEnd(t *test
 	}
 }
 
+func TestOpskitCommandFailureUsesRuntimeRetryAndObservation(t *testing.T) {
+	observer := &recordingObserver{}
+	rt := newTestRuntime(t, WithObserver(observer))
+	var attempts int
+	handler := opskit.CommandHandlerFunc(func(context.Context, opskit.CommandRequest) opskit.CommandResult {
+		attempts++
+		if attempts == 1 {
+			return opskit.FailedCommand("transient", errors.New("try again"), 0)
+		}
+		return opskit.CompletedCommand("completed", map[string]bool{"ok": true}, 0)
+	})
+	err := rt.Register(
+		WorkerSpec{Name: "worker", Worker: testWorker{}},
+		WithWorkerCommandRetry(retrykit.Attempts(2, nil, nil)),
+		WithCommandSpec(CommandFromOpskit(opskit.CommandDescriptor{Name: "refresh", Idempotent: true}, handler)),
+	)
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "worker"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	result, err := rt.Dispatch(context.Background(), CommandRequest{Worker: "worker", Name: "refresh"})
+	if err != nil {
+		t.Fatalf("Dispatch returned error: %v", err)
+	}
+	if attempts != 2 || result.Message != "completed" || string(result.Payload) != `{"ok":true}` {
+		t.Fatalf("attempts = %d, result = %#v, want retried completed result", attempts, result)
+	}
+	events := observer.snapshot()
+	if len(events.failures) != 1 || !errors.Is(events.failures[0].Err, ErrOpsCommandFailed) {
+		t.Fatalf("failures = %#v, want one Opskit command failure", events.failures)
+	}
+	worker, _ := rt.Worker("worker")
+	if worker.Status.LastCommandFailure == nil || worker.Status.LastCommandFailure.Command != "refresh" {
+		t.Fatalf("LastCommandFailure = %#v, want refresh failure", worker.Status.LastCommandFailure)
+	}
+}
+
 func TestRecordingObserverSupportsConcurrentDispatches(t *testing.T) {
 	const dispatches = 32
 	observer := &recordingObserver{}
@@ -553,6 +594,36 @@ func TestCommandsReturnsSortedDiscoveryForLocalAndQualifiedWorkerNames(t *testin
 	}
 	if _, ok := rt.Commands("missing"); ok {
 		t.Fatal("Commands missing worker ok = true, want false")
+	}
+}
+
+func TestCommandsPreservesAndClonesOpskitMetadata(t *testing.T) {
+	attrs := []opskit.Attribute{opskit.Attr("scope", "cache")}
+	rt := newTestRuntime(t)
+	err := rt.Register(WorkerSpec{Name: "worker", Worker: testWorker{}}, WithCommandSpec(CommandSpec{
+		Name:        "refresh",
+		PayloadKind: "cache_refresh",
+		Dangerous:   true,
+		Idempotent:  true,
+		Attributes:  attrs,
+		Handler:     CommandHandlerFunc(func(context.Context, CommandRequest) (CommandResult, error) { return CommandResult{}, nil }),
+	}))
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	attrs[0] = opskit.Attr("scope", "mutated")
+
+	commands, _ := rt.Commands("worker")
+	if len(commands) != 1 || commands[0].PayloadKind != "cache_refresh" || !commands[0].Dangerous || !commands[0].Idempotent {
+		t.Fatalf("commands = %#v, want Opskit metadata", commands)
+	}
+	if commands[0].Attributes[0] != opskit.Attr("scope", "cache") {
+		t.Fatalf("attributes = %#v, want registration-time clone", commands[0].Attributes)
+	}
+	commands[0].Attributes[0] = opskit.Attr("scope", "returned mutation")
+	again, _ := rt.Commands("worker")
+	if again[0].Attributes[0] != opskit.Attr("scope", "cache") {
+		t.Fatalf("attributes = %#v, want discovery clone", again[0].Attributes)
 	}
 }
 

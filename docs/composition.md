@@ -17,6 +17,8 @@ Workerkit owns:
 - command concurrency limits
 - failure policy
 - observer events
+- scheduled execution of Opskit check and check-group hooks
+- execution of active Opskit command handlers through `CommandFromOpskit`
 
 Servekit owns:
 
@@ -58,6 +60,35 @@ routes such as:
 
 This is pod-local/runtime-local state. It describes the Workerkit runtime in
 this process; it is not a distributed worker registry.
+
+## Active Opskit Execution
+
+Opskit defines component metadata and read models together with explicit
+`Checker`, `CheckGroup`, and `CommandHandler` execution hooks. Its registry can
+discover those capabilities, but it does not schedule or invoke them.
+
+Workerkit owns that active execution:
+
+- `NewCheckLoop` turns one `opskit.Checker` into a periodically managed worker.
+- `NewCheckGroupLoop` turns one `opskit.CheckGroup` into a periodically managed worker.
+- `CommandFromOpskit` turns one descriptor and `opskit.CommandHandler` into a normal Workerkit command spec.
+
+The check constructors preserve Workerkit lifecycle, cancellation, cooperative
+timeouts, jitter, panic recovery, readiness, and failure reporting. The command
+adapter preserves Workerkit dispatch admission, retry, concurrency, timeout,
+panic, observation, and lifecycle behavior. Domain kits therefore implement
+Opskit contracts instead of maintaining pairwise Workerkit adapters.
+
+A checked component remains responsible for caching and exposing its component
+status. Decide explicitly how readiness should be represented when both that
+component and its Workerkit check-loop worker are registered. Usually one is the
+required readiness signal and the other is optional or informational; making
+both required can duplicate the same dependency gate.
+
+Check timeouts are cooperative and cannot interrupt implementations that ignore
+context cancellation. Group-worker readiness contains only the aggregate
+summary; retain per-check detail in the checked component or through
+`WithCheckSummaryObserver`.
 
 ## Kubernetes and Multiple Replicas
 
@@ -141,7 +172,7 @@ creates a small private Opskit registry for Workerkit-only readiness. The older
 `opshttp.ReadinessCheck(runtime)` adapter remains available for standalone
 Servekit users who do not want an Opskit registry.
 
-## Workerkit-Specific HTTP Operations
+## Optional Workerkit-Specific HTTP Operations
 
 Use `opshttp.Mount` when you need Workerkit-specific HTTP routes. These are not
 the primary composed read-only path, but they remain useful for command dispatch
@@ -159,6 +190,16 @@ admin routes for composed services, and mount `opshttp` only when these
 Workerkit-specific routes are useful.
 
 ## Command Dispatch
+
+Opskit components can expose command descriptors and handler hooks without
+depending on Workerkit. Opskit defines those contracts but does not invoke the
+handler. `workerkit.CommandFromOpskit` binds one descriptor and handler into the
+normal Workerkit command registry. This avoids pairwise Workerkit adapters in
+domain kits while keeping routing, lifecycle admission,
+timeouts, retries, concurrency, panic recovery, and observation in Workerkit.
+
+The native Workerkit `CommandHandler` remains available for Workerkit-specific
+or non-JSON command contracts. The Opskit adapter coexists with it.
 
 HTTP command dispatch is opt-in:
 
@@ -246,7 +287,12 @@ readiness.
 ## Examples
 
 - [`examples/managed-service`](../examples/managed-service)
+- [`examples/opskit-checks`](../examples/opskit-checks)
+- [`examples/opskit-command`](../examples/opskit-command)
+- [`examples/production-composition`](../examples/production-composition)
+
+Optional Workerkit-specific HTTP controls:
+
 - [`examples/opshttp-basic`](../examples/opshttp-basic)
 - [`examples/opshttp-commands`](../examples/opshttp-commands)
 - [`examples/admin-lifecycle`](../examples/admin-lifecycle)
-- [`examples/production-composition`](../examples/production-composition)

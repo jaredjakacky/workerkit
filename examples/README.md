@@ -18,9 +18,13 @@ Read the examples in the order listed below. Each one builds on the last. By the
 
 **[readiness](readiness)** — Running is not the same as ready. This example shows how individual worker readiness rolls up to aggregate runtime readiness, and why that distinction matters for traffic management and health checks.
 
-### Commands, Policy, and Backpressure
+### Opskit Execution, Commands, and Policy
 
 **[commands](commands)** — Workers own their own command surface. No HTTP required. Direct dispatch, JSON payload bytes in and out, result handling, and command failure status. This shows that commands are part of the worker runtime, not an HTTP feature.
+
+**[opskit-checks](opskit-checks)** — Workerkit periodically executes generic Opskit `Checker` and `CheckGroup` hooks. It also demonstrates how to keep the passive Opskit registry and Workerkit readiness from counting the same dependency twice.
+
+**[opskit-command](opskit-command)** — A generic Opskit command handler executed through Workerkit. Descriptor metadata, request translation, structured result encoding, and Workerkit-owned execution policy without a domain-specific adapter.
 
 **[retry-policy](retry-policy)** — Bounded attempts, exponential backoff, full jitter, and retry predicates. This shows the retry posture Workerkit expects: bounded, jittered, and predicate-gated.
 
@@ -40,19 +44,23 @@ Read the examples in the order listed below. Each one builds on the last. By the
 
 **[observability-otel](observability-otel)** — The same observer events flowing into OpenTelemetry. Command spans with timing and attributes, lifecycle events on parent spans, dispatch counters, duration histograms. The runtime never touches OTel directly — the adapter does.
 
-### Servekit Integration
+### Primary Kit Series Composition
 
 **[managed-service](managed-service)** — The preferred microservice shell. `servekitservice.NewManaged` wires Workerkit readiness into Servekit through Opskit automatically, starts workers before serving, and drains and stops them gracefully on shutdown. Add application routes through `Service.Server()` while Workerkit owns worker lifecycle.
 
-**[opshttp-basic](opshttp-basic)** — Standalone Workerkit-to-Servekit operations routes. Useful when you want Workerkit-specific read-only routes without using generic Opskit admin component routes. No lifecycle mutation without explicit opt-in.
+**[production-composition](production-composition)** — The full composition. Multiple workers, a shared Opskit registry, Servekit `/readyz` and generic admin component inspection, commands, retry, concurrency limits, failure policy, slog observability, opt-in command dispatch, and graceful shutdown.
+
+### Optional Workerkit HTTP Controls
+
+These examples are not the primary Kit Series composition path. They exist for
+deployments that specifically need Workerkit-shaped inspection or privileged
+remote controls.
+
+**[opshttp-basic](opshttp-basic)** — Standalone Workerkit-specific read-only routes. Generic Opskit admin component routes remain the preferred composed read path. No lifecycle mutation is enabled.
 
 **[opshttp-commands](opshttp-commands)** — Opt-in HTTP command dispatch. Includes success paths, invalid request handling, missing target mapping, saturation responses, and how to apply endpoint policy to the dispatch route specifically.
 
 **[admin-lifecycle](admin-lifecycle)** — Privileged lifecycle controls over HTTP. Workers registered but not started — started, drained, and stopped through lifecycle routes. Includes placeholder auth, audit, and timeout policy to show where your own policy plugs in.
-
-### The Full Picture
-
-**[production-composition](production-composition)** — The full composition. Multiple workers, Opskit registry integration, Servekit `/readyz` and generic admin component inspection, commands, retry, concurrency limits, failure policy, slog observability, opt-in mutating ops, and graceful shutdown. This is the target shape for a production Workerkit service.
 
 ---
 
@@ -80,8 +88,9 @@ go run ./examples/<name>
 # for example
 go run ./examples/basic
 go run ./examples/commands
+go run ./examples/opskit-checks
+go run ./examples/opskit-command
 go run ./examples/multi-worker
-go run ./examples/opshttp-basic
 go run ./examples/production-composition
 
 # test-only example

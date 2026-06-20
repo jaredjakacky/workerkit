@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	opskit "github.com/jaredjakacky/opskit"
 	"github.com/jaredjakacky/servekit"
 	workerkit "github.com/jaredjakacky/workerkit"
 	"github.com/jaredjakacky/workerkit/opshttp"
@@ -48,15 +49,18 @@ func main() {
 		}
 	}()
 
-	// This example demonstrates the Kit-series boundary: Workerkit owns runtime
-	// status, while Servekit owns HTTP routing, readiness, and endpoint policy.
+	ops := opskit.NewRegistry()
+	ops.MustRegister(runtime, opskit.Required())
+
+	// Opskit is still the readiness path in this optional opshttp example.
+	// Workerkit owns runtime status while Servekit owns HTTP presentation.
 	server := servekit.New(
 		servekit.WithAddr(":8080"),
-		servekit.WithReadinessChecks(opshttp.ReadinessCheck(runtime)),
+		servekit.WithOps(ops),
 	)
 
-	// opshttp is the bridge: it adapts Workerkit inspection into Servekit routes
-	// without making HTTP part of the core Workerkit runtime.
+	// opshttp adds Workerkit-specific inspection only because this example is
+	// explicitly about that optional surface.
 	if err := opshttp.Mount(server, runtime,
 		opshttp.WithEndpointOptions(servekit.WithEndpointTimeout(2*time.Second)),
 	); err != nil {

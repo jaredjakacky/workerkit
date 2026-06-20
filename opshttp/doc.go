@@ -1,4 +1,12 @@
-// Package opshttp mounts Workerkit's Servekit-backed HTTP operations surface.
+// Package opshttp mounts Workerkit's optional Servekit-backed HTTP control
+// surface.
+//
+// In composed Kit Series services, register Runtime with Opskit and pass that
+// registry to Servekit with servekit.WithOps(...) for /readyz and generic
+// read-only admin component routes. Mount is for Workerkit-specific inspection,
+// command dispatch, or privileged lifecycle controls; it is not the primary
+// read-only composition path. ReadinessCheck remains available for standalone
+// Servekit services that do not use an Opskit registry.
 //
 // By default, Mount adds these routes under DefaultPrefix:
 //
@@ -30,11 +38,6 @@
 // command discovery, command dispatch, lifecycle controls, and command errors
 // into a Servekit-native operations surface without making HTTP part of the core
 // workerkit runtime.
-//
-// In composed Kit Series services, register Runtime with Opskit and pass that
-// registry to Servekit with servekit.WithOps(...) for /readyz and generic
-// read-only admin component routes. ReadinessCheck remains available for
-// standalone Servekit services that do not use an Opskit registry.
 //
 // Use Mount to add Workerkit-specific routes to a Servekit server,
 // WithEndpointOptions for shared route policy, WithCommandDispatchEnabled to
