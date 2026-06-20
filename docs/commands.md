@@ -203,6 +203,12 @@ runtime.Register(spec,
 Only retry commands that are safe to repeat. Use predicates to reject permanent
 failures.
 
+For Opskit-adapted commands, retry predicates should usually exclude errors
+matching `ErrOpsCommandRejected`: rejection commonly means an invalid payload,
+disabled command, policy refusal, or another permanent domain outcome. Retry
+`ErrOpsCommandFailed` only when the application can identify the failure as
+transient and repeating the command is safe.
+
 This is especially important for Opskit adapters: JSON result encoding happens
 after the domain handler returns. An encoding failure is reported as
 `ErrOpsCommandFailed` and may be retried by the configured policy even though
