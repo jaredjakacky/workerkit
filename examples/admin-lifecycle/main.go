@@ -44,9 +44,8 @@ func main() {
 	)
 
 	// Servekit owns endpoint policy here: authentication, authorization,
-	// audit logging, request limits, and route-specific timeouts belong at the HTTP boundary.
-	// opshttp.Mount exposes read-only /admin routes by default, so the shared
-	// admin policy applies to every mounted operations route, not only lifecycle controls.
+	// audit logging, request limits, and route-specific timeouts belong at the
+	// HTTP boundary. opshttp adds only the explicitly enabled lifecycle routes.
 	adminPolicy := []servekit.EndpointOption{
 		servekit.WithAuthGate(requireAdminToken),
 		servekit.WithEndpointMiddleware(auditAdminRequest),

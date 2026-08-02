@@ -1,9 +1,7 @@
 package opshttp
 
 import (
-	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -16,16 +14,12 @@ import (
 const DefaultPrefix = "/admin"
 
 const (
-	runtimeRoute         = "runtime"
 	runtimeStartRoute    = "runtime/start"
 	runtimeDrainRoute    = "runtime/drain"
 	runtimeStopRoute     = "runtime/stop"
-	workersRoute         = "workers"
 	workerStartRoute     = "workers/start"
 	workerDrainRoute     = "workers/drain"
 	workerStopRoute      = "workers/stop"
-	workerRoute          = "worker"
-	commandsRoute        = "commands"
 	commandDispatchRoute = "commands/dispatch"
 )
 
@@ -67,12 +61,11 @@ func WithPrefix(prefix string) Option {
 }
 
 // WithEndpointOptions appends Servekit endpoint options to every mounted
-// Workerkit operations route.
+// Workerkit control route.
 //
-// Use this for policy that should apply to status, inspection, command
-// discovery, command dispatch, and lifecycle control routes alike, such as
-// authentication, endpoint middleware, response encoding, body limits, or
-// timeouts.
+// Use this for policy that should apply to command dispatch and lifecycle
+// controls alike, such as authentication, endpoint middleware, response
+// encoding, body limits, or timeouts.
 func WithEndpointOptions(opts ...servekit.EndpointOption) Option {
 	return func(cfg *config) {
 		cfg.endpointOptions = append(cfg.endpointOptions, opts...)
@@ -83,7 +76,8 @@ func WithEndpointOptions(opts ...servekit.EndpointOption) Option {
 // dispatch routes.
 //
 // Dispatch routes can mutate worker state or trigger domain work, so callers
-// often protect them more strictly than read-only inspection routes.
+// should protect them with appropriate authentication, authorization, and
+// audit policy.
 func WithDispatchOptions(opts ...servekit.EndpointOption) Option {
 	return func(cfg *config) {
 		cfg.dispatchOptions = append(cfg.dispatchOptions, opts...)
@@ -93,8 +87,8 @@ func WithDispatchOptions(opts ...servekit.EndpointOption) Option {
 // WithLifecycleOptions appends Servekit endpoint options only to lifecycle
 // control routes.
 //
-// Lifecycle controls mutate worker state, so callers often protect them more
-// strictly than read-only inspection routes.
+// Lifecycle controls mutate worker state, so callers should protect them with
+// appropriate authentication, authorization, and audit policy.
 func WithLifecycleOptions(opts ...servekit.EndpointOption) Option {
 	return func(cfg *config) {
 		cfg.lifecycleOptions = append(cfg.lifecycleOptions, opts...)
@@ -142,19 +136,18 @@ func WithAdminLifecycleControlsEnabled() Option {
 	}
 }
 
-// Mount adds Workerkit operations routes to an existing Servekit server.
+// Mount adds explicitly enabled Workerkit control routes to an existing
+// Servekit server.
 //
 // Servekit owns HTTP service construction, middleware, readiness endpoints,
-// authentication, and lifecycle. Mount adds Workerkit's runtime status, worker
-// inspection, and command discovery routes. Pass WithCommandDispatchEnabled to
-// mount the mutating command dispatch route. Pass
+// authentication, and lifecycle. Pass WithCommandDispatchEnabled to mount the
+// mutating command dispatch route. Pass
 // WithAdminLifecycleControlsEnabled to mount privileged lifecycle control
-// routes.
+// routes. Mount exposes no routes unless at least one control group is enabled.
 //
-// In composed Kit Series services, register Runtime with Opskit and pass that
-// registry to Servekit with servekit.WithOps(...). ReadinessCheck remains
-// available for standalone Servekit services that do not use an Opskit
-// registry.
+// Register Runtime with Opskit and pass that registry to Servekit with
+// servekit.WithOps(...) for readiness, status, inspection, and command
+// inventory. This package is only for active Workerkit-specific HTTP controls.
 func Mount(server *servekit.Server, runtime *workerkit.Runtime, opts ...Option) error {
 	if server == nil {
 		return ErrNilServer
@@ -170,7 +163,6 @@ func Mount(server *servekit.Server, runtime *workerkit.Runtime, opts ...Option) 
 		}
 	}
 
-	registerStatusRoutes(server, runtime, cfg)
 	if cfg.commandDispatchEnabled {
 		registerCommandRoutes(server, runtime, cfg)
 	}
@@ -178,25 +170,6 @@ func Mount(server *servekit.Server, runtime *workerkit.Runtime, opts ...Option) 
 		registerLifecycleRoutes(server, runtime, cfg)
 	}
 	return nil
-}
-
-// ReadinessCheck adapts RuntimeStatus readiness into a Servekit readiness
-// check.
-//
-// Deprecated: register Runtime with Opskit and pass the registry to Servekit
-// with servekit.WithOps instead. Use ReadinessCheck only for standalone
-// Servekit services that do not use an Opskit registry.
-func ReadinessCheck(runtime *workerkit.Runtime) servekit.ReadinessCheck {
-	return func(_ context.Context) error {
-		if runtime == nil {
-			return ErrNilRuntime
-		}
-		status := runtime.RuntimeStatus()
-		if !status.Ready {
-			return fmt.Errorf("worker runtime not ready: state=%s", status.State)
-		}
-		return nil
-	}
 }
 
 func normalizePrefix(prefix string) string {

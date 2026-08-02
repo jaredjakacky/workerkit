@@ -13,6 +13,11 @@ type workerLifecycleRequest struct {
 	Name string `json:"name"`
 }
 
+type runtimeLifecycleResult struct {
+	Identity workerkit.Identity      `json:"identity"`
+	Status   workerkit.RuntimeStatus `json:"status"`
+}
+
 // registerLifecycleRoutes mounts opt-in mutating lifecycle controls.
 //
 // Runtime drain uses Runtime.DrainAll semantics: it drains workers
@@ -88,8 +93,8 @@ func workerLifecycleResponse(runtime *workerkit.Runtime, name string) (workerkit
 	return worker, nil
 }
 
-func runtimeLifecycleResponse(runtime *workerkit.Runtime) runtimeDescriptor {
-	return runtimeDescriptor{
+func runtimeLifecycleResponse(runtime *workerkit.Runtime) runtimeLifecycleResult {
+	return runtimeLifecycleResult{
 		Identity: runtime.Identity(),
 		Status:   runtime.RuntimeStatus(),
 	}

@@ -3,7 +3,6 @@ package servekitservice_test
 import (
 	"context"
 	"errors"
-	. "github.com/jaredjakacky/workerkit/servekitservice"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,10 +10,9 @@ import (
 	"testing"
 	"time"
 
-	opskit "github.com/jaredjakacky/opskit"
 	"github.com/jaredjakacky/servekit"
 	workerkit "github.com/jaredjakacky/workerkit"
-	"github.com/jaredjakacky/workerkit/opshttp"
+	. "github.com/jaredjakacky/workerkit/servekitservice"
 )
 
 type testWorker struct {
@@ -36,228 +34,47 @@ func (w testWorker) Stop(ctx context.Context) error {
 	return w.stop(ctx)
 }
 
-func TestNewRejectsInvalidInputsAndServekitOptions(t *testing.T) {
+func TestNewRejectsInvalidInputs(t *testing.T) {
 	t.Parallel()
 
 	rt := newTestRuntime(t)
 	server := servekit.New()
 
-	if _, err := New(nil, server); !errors.Is(err, opshttp.ErrNilRuntime) {
+	if _, err := New(nil, server); !errors.Is(err, ErrNilRuntime) {
 		t.Fatalf("New nil runtime error = %v, want ErrNilRuntime", err)
 	}
-	if _, err := New(rt, nil); !errors.Is(err, opshttp.ErrNilServer) {
+	if _, err := New(rt, nil); !errors.Is(err, ErrNilServer) {
 		t.Fatalf("New nil server error = %v, want ErrNilServer", err)
-	}
-	if _, err := New(rt, server, WithServekitOptions(servekit.WithAddr("127.0.0.1:0"))); err == nil {
-		t.Fatal("New with servekit options returned nil, want error")
 	}
 }
 
-func TestNewDoesNotMountOpsHTTPByDefaultAndCanEnableIt(t *testing.T) {
+func TestNewPreservesApplicationOwnedServer(t *testing.T) {
 	t.Parallel()
 
 	rt := newTestRuntime(t)
 	server := servekit.New(servekit.WithAccessLogEnabled(false))
-	if _, err := New(rt, server); err != nil {
-		t.Fatalf("New returned error: %v", err)
-	}
-
-	rec := performRequest(server, http.MethodGet, "/admin/runtime")
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("default ops route status = %d, want %d", rec.Code, http.StatusNotFound)
-	}
-
-	enabledServer := servekit.New(servekit.WithAccessLogEnabled(false))
-	if _, err := New(rt, enabledServer, WithOpsHTTPEnabled(true)); err != nil {
-		t.Fatalf("New enabled ops returned error: %v", err)
-	}
-	rec = performRequest(enabledServer, http.MethodGet, "/admin/runtime")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("enabled ops route status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-}
-
-func TestNewManagedWiresReadiness(t *testing.T) {
-	t.Parallel()
-
-	rt := newTestRuntime(t)
-	if err := rt.Register(workerkit.WorkerSpec{Name: "worker", Worker: testWorker{}}); err != nil {
-		t.Fatalf("Register returned error: %v", err)
-	}
-	service, err := NewManaged(rt, WithServekitOptions(servekit.WithAddr("127.0.0.1:0")))
-	if err != nil {
-		t.Fatalf("NewManaged returned error: %v", err)
-	}
-	service.Server().SetReady(true)
-
-	rec := performRequest(service.Server(), http.MethodGet, "/readyz")
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("readyz before worker start status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
-	}
-	if !strings.Contains(rec.Body.String(), "one or more readiness components are not ready") {
-		t.Fatalf("readyz body = %s, want Opskit readiness reason", rec.Body.String())
-	}
-
-	if err := rt.Start(context.Background(), "worker"); err != nil {
-		t.Fatalf("Start returned error: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = rt.Stop(context.Background(), "worker")
-	})
-
-	rec = performRequest(service.Server(), http.MethodGet, "/readyz")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("readyz after worker start status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-}
-
-func TestNewManagedUsesProvidedOpsRegistry(t *testing.T) {
-	t.Parallel()
-
-	ops := opskit.NewRegistry()
-	ops.MustRegister(opskit.ComponentFunc{
-		Info: opskit.ComponentInfo{Name: "config", Kind: "config"},
-		Fn: func(context.Context) opskit.Status {
-			return opskit.ReadyStatus("configuration loaded")
-		},
-	}, opskit.Required())
-	rt := newTestRuntime(t)
-	if err := rt.Register(workerkit.WorkerSpec{Name: "worker", Worker: testWorker{}}); err != nil {
-		t.Fatalf("Register returned error: %v", err)
-	}
-
-	service, err := NewManaged(
-		rt,
-		WithOpsRegistry(ops),
-		WithServekitOptions(servekit.WithAddr("127.0.0.1:0")),
-	)
-	if err != nil {
-		t.Fatalf("NewManaged returned error: %v", err)
-	}
-	service.Server().SetReady(true)
-
-	if _, ok := ops.Component("config"); !ok {
-		t.Fatal("existing config component missing from provided registry")
-	}
-	if _, ok := ops.Component("service"); !ok {
-		t.Fatal("workerkit runtime missing from provided registry")
-	}
-	if entries := ops.Entries(); len(entries) != 2 {
-		t.Fatalf("registry entries = %d, want 2", len(entries))
-	}
-
-	rec := performRequest(service.Server(), http.MethodGet, "/readyz")
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("readyz before worker start status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
-	}
-
-	if err := rt.Start(context.Background(), "worker"); err != nil {
-		t.Fatalf("Start returned error: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = rt.Stop(context.Background(), "worker")
-	})
-
-	rec = performRequest(service.Server(), http.MethodGet, "/readyz")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("readyz after worker start status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-}
-
-func TestNewManagedPreservesOpsAdminOptionsForProvidedRegistry(t *testing.T) {
-	t.Parallel()
-
-	ops := opskit.NewRegistry()
-	ops.MustRegister(opskit.ComponentFunc{
-		Info: opskit.ComponentInfo{Name: "config", Kind: "config"},
-		Fn: func(context.Context) opskit.Status {
-			return opskit.ReadyStatus("configuration loaded")
-		},
-	}, opskit.Required())
-	rt := newTestRuntime(t)
-
-	service, err := NewManaged(
-		rt,
-		WithOpsRegistry(ops, servekit.WithOpsAdmin()),
-		WithServekitOptions(servekit.WithAddr("127.0.0.1:0")),
-	)
-	if err != nil {
-		t.Fatalf("NewManaged returned error: %v", err)
-	}
-
-	rec := performRequest(service.Server(), http.MethodGet, "/admin/components")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("/admin/components status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	body := rec.Body.String()
-	if !strings.Contains(body, `"name":"config"`) {
-		t.Fatalf("/admin/components body missing config component: %s", body)
-	}
-	if !strings.Contains(body, `"name":"service"`) {
-		t.Fatalf("/admin/components body missing workerkit runtime: %s", body)
-	}
-}
-
-func TestNewManagedRejectsNilOpsRegistry(t *testing.T) {
-	t.Parallel()
-
-	_, err := NewManaged(newTestRuntime(t), WithOpsRegistry(nil))
-	if err == nil || !strings.Contains(err.Error(), "WithOpsRegistry requires non-nil registry") {
-		t.Fatalf("NewManaged error = %v, want nil registry error", err)
-	}
-}
-
-func TestServerReturnsManagedServerAndAllowsNilReceiver(t *testing.T) {
-	t.Parallel()
-
-	if got := (*Service)(nil).Server(); got != nil {
-		t.Fatalf("nil service Server = %#v, want nil", got)
-	}
-
-	rt := newTestRuntime(t)
-	service, err := NewManaged(rt)
-	if err != nil {
-		t.Fatalf("NewManaged returned error: %v", err)
-	}
-	if service.Server() == nil {
-		t.Fatal("Server returned nil")
-	}
-
-	service.Server().Handle(http.MethodGet, "/app", func(r *http.Request) (any, error) {
+	server.Handle(http.MethodGet, "/app", func(r *http.Request) (any, error) {
 		return map[string]string{"ok": "true"}, nil
 	})
+	service, err := New(rt, server)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	if service.Server() != server {
+		t.Fatal("Server did not return the application-owned server")
+	}
+
 	rec := performRequest(service.Server(), http.MethodGet, "/app")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("app route status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 }
 
-func TestReadinessCheck(t *testing.T) {
+func TestServerAllowsNilReceiver(t *testing.T) {
 	t.Parallel()
 
-	if err := ReadinessCheck(nil)(context.Background()); !errors.Is(err, opshttp.ErrNilRuntime) {
-		t.Fatalf("nil readiness error = %v, want ErrNilRuntime", err)
-	}
-
-	rt := newTestRuntime(t)
-	if err := ReadinessCheck(rt)(context.Background()); err == nil || !strings.Contains(err.Error(), "worker runtime not ready") {
-		t.Fatalf("unready readiness error = %v, want not ready error", err)
-	}
-
-	if err := rt.Register(workerkit.WorkerSpec{Name: "worker", Worker: testWorker{}}); err != nil {
-		t.Fatalf("Register returned error: %v", err)
-	}
-	if err := rt.Start(context.Background(), "worker"); err != nil {
-		t.Fatalf("Start returned error: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = rt.Stop(context.Background(), "worker")
-	})
-	if err := ReadinessCheck(rt)(context.Background()); err != nil {
-		t.Fatalf("ready readiness error = %v, want nil", err)
-	}
-	if opts := ReadinessOptions(rt); len(opts) != 1 {
-		t.Fatalf("ReadinessOptions length = %d, want 1", len(opts))
+	if got := (*Service)(nil).Server(); got != nil {
+		t.Fatalf("nil service Server = %#v, want nil", got)
 	}
 }
 
@@ -373,30 +190,6 @@ func TestShutdownWorkersStopsStartedWorkers(t *testing.T) {
 	}
 	if state := requireWorkerState(t, rt, "worker"); state != workerkit.StateStopped {
 		t.Fatalf("worker state = %s, want stopped", state)
-	}
-}
-
-func TestNewManagedCanMountOpsHTTP(t *testing.T) {
-	t.Parallel()
-
-	rt := newTestRuntime(t)
-	service, err := NewManaged(
-		rt,
-		WithOpsHTTPEnabled(true),
-		WithStartWorkers(false),
-		WithGracefulWorkerShutdown(false),
-		WithShutdownTimeout(-1),
-		WithServekitOptions(servekit.WithAddr("127.0.0.1:0")),
-	)
-	if err != nil {
-		t.Fatalf("NewManaged returned error: %v", err)
-	}
-	if service.Server() == nil {
-		t.Fatal("Server returned nil")
-	}
-	rec := performRequest(service.Server(), http.MethodGet, "/admin/runtime")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("ops runtime status = %d, want %d", rec.Code, http.StatusOK)
 	}
 }
 
@@ -522,10 +315,10 @@ func TestRunRejectsInvalidService(t *testing.T) {
 	if err := nilService.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "workerkit service must not be nil") {
 		t.Fatalf("nil service Run error = %v, want nil service error", err)
 	}
-	if err := (&Service{}).Run(context.Background()); !errors.Is(err, opshttp.ErrNilRuntime) {
+	if err := (&Service{}).Run(context.Background()); !errors.Is(err, ErrNilRuntime) {
 		t.Fatalf("missing runtime Run error = %v, want ErrNilRuntime", err)
 	}
-	if _, err := New(newTestRuntime(t), nil); !errors.Is(err, opshttp.ErrNilServer) {
+	if _, err := New(newTestRuntime(t), nil); !errors.Is(err, ErrNilServer) {
 		t.Fatalf("New missing server error = %v, want ErrNilServer", err)
 	}
 }
@@ -543,17 +336,13 @@ func newTestRuntime(t *testing.T) *workerkit.Runtime {
 func newTestService(t *testing.T, rt *workerkit.Runtime, opts ...Option) *Service {
 	t.Helper()
 
-	baseOpts := []Option{
-		WithOpsHTTPOptions(nil),
-		WithServekitOptions(
-			servekit.WithAddr("127.0.0.1:0"),
-			servekit.WithAccessLogEnabled(false),
-		),
-	}
-	baseOpts = append(baseOpts, opts...)
-	service, err := NewManaged(rt, baseOpts...)
+	server := servekit.New(
+		servekit.WithAddr("127.0.0.1:0"),
+		servekit.WithAccessLogEnabled(false),
+	)
+	service, err := New(rt, server, opts...)
 	if err != nil {
-		t.Fatalf("NewManaged returned error: %v", err)
+		t.Fatalf("New returned error: %v", err)
 	}
 	return service
 }

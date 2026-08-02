@@ -157,8 +157,9 @@ and runtime concurrency limits and idle waits.
 2. wait for runtime idle
 3. stop all workers
 
-Use `Shutdown` for CLIs, tests, and non-Servekit programs. Use
-`servekitservice.NewManaged` when Servekit owns the process HTTP lifecycle.
+Use `Shutdown` for CLIs, tests, and non-Servekit programs. When useful,
+`servekitservice.New` coordinates Workerkit lifecycle around an
+application-owned Servekit server.
 
 HTTP lifecycle controls are not Kubernetes Deployment lifecycle controls. They
 mutate one Workerkit runtime in one process. Kubernetes rollout, termination,
@@ -256,10 +257,9 @@ register the Workerkit runtime in an Opskit registry and pass that registry to
 Servekit with `servekit.WithOps(...)`. Servekit then includes Workerkit runtime
 readiness in `/readyz` through Opskit.
 
-`servekitservice.NewManaged` and `servekitservice.ReadinessOptions` use that
-Opskit path for the common service shell. `opshttp.ReadinessCheck` remains as a
-standalone Servekit readiness adapter for users who are not using an Opskit
-registry.
+Applications build that registry and server explicitly. The optional
+`servekitservice.New` coordinator only manages startup and graceful shutdown;
+it does not create a private registry or readiness adapter.
 
 That keeps the boundary clear:
 
@@ -272,4 +272,4 @@ That keeps the boundary clear:
 - [`examples/readiness`](../examples/readiness)
 - [`examples/opskit-checks`](../examples/opskit-checks)
 - [`examples/failure-policy`](../examples/failure-policy)
-- [`examples/managed-service`](../examples/managed-service)
+- [`examples/production-composition`](../examples/production-composition)

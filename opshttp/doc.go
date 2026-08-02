@@ -1,21 +1,10 @@
-// Package opshttp mounts Workerkit's optional Servekit-backed HTTP control
-// surface.
+// Package opshttp mounts explicitly enabled Workerkit controls into Servekit.
 //
-// In composed Kit Series services, register Runtime with Opskit and pass that
-// registry to Servekit with servekit.WithOps(...) for /readyz and generic
-// read-only admin component routes. Mount is for Workerkit-specific inspection,
-// command dispatch, or privileged lifecycle controls; it is not the primary
-// read-only composition path. ReadinessCheck remains available for standalone
-// Servekit services that do not use an Opskit registry.
+// Register Runtime with Opskit and pass that registry to Servekit with
+// servekit.WithOps(...) for /readyz, generic component inspection, and passive
+// command inventory. This package does not duplicate those read-only surfaces.
 //
-// By default, Mount adds these routes under DefaultPrefix:
-//
-//	GET  /admin/runtime
-//	GET  /admin/workers
-//	GET  /admin/worker?name=runtime/worker
-//	GET  /admin/commands?worker=runtime/worker
-//
-// WithCommandDispatchEnabled also mounts:
+// Mount exposes no routes by default. WithCommandDispatchEnabled mounts:
 //
 //	POST /admin/commands/dispatch
 //
@@ -34,15 +23,13 @@
 //
 // Servekit owns HTTP service construction, middleware, authentication,
 // readiness endpoints, request policy, and lifecycle. Workerkit owns runtime
-// semantics. This package adapts Workerkit-specific status, worker inspection,
-// command discovery, command dispatch, lifecycle controls, and command errors
-// into a Servekit-native operations surface without making HTTP part of the core
-// workerkit runtime.
+// semantics. This package adapts Workerkit command dispatch, lifecycle controls,
+// and control errors into a Servekit-native operations surface without making
+// HTTP part of the core workerkit runtime.
 //
-// Use Mount to add Workerkit-specific routes to a Servekit server,
-// WithEndpointOptions for shared route policy, WithCommandDispatchEnabled to
-// expose command dispatch, and WithAdminLifecycleControlsEnabled to expose
-// lifecycle controls.
+// Use WithEndpointOptions for policy shared by every enabled control route,
+// WithCommandDispatchEnabled to expose command dispatch, and
+// WithAdminLifecycleControlsEnabled to expose lifecycle controls.
 // WithDispatchOptions and WithLifecycleOptions apply stricter policy to those
 // mutating route groups.
 //
@@ -59,6 +46,7 @@
 //
 // Worker and runtime stop routes close command admission but do not wait for or
 // cancel commands that were already admitted. For graceful command completion,
-// drain through the lifecycle route, poll status until InFlight is zero, then
-// call the corresponding stop route.
+// drain through the lifecycle route, inspect the runtime through Servekit's
+// generic Opskit component route until InFlight is zero, then call the
+// corresponding stop route.
 package opshttp

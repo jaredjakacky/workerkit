@@ -11,7 +11,7 @@ If you only remember the common path, remember this:
 - `New(...)` creates one runtime for a service boundary
 - `Register(...)` attaches workers and their operational policy
 - `StartAll(...)` and `Shutdown(...)` cover the core runtime lifecycle
-- `servekitservice.NewManaged(...)` wires Workerkit into the common Servekit service lifecycle
+- `servekitservice.New(...)` optionally coordinates Workerkit lifecycle around an application-owned Servekit server
 - `WithCommand(...)` and `WithCommandSpec(...)` expose worker-owned operations
 - `NewCheckLoop(...)`, `NewCheckGroupLoop(...)`, and `CommandFromOpskit(...)` execute active Opskit work
 - `servekit.WithOps(...)` presents shared Opskit state through Servekit
@@ -236,7 +236,10 @@ Everything else in this file exists to customize that path without turning worke
 
   Discovery metadata for one registered worker-owned command.
 
-`RuntimeStatus`, `WorkerSnapshot`, `WorkerStatus`, `CommandInfo`, and nested status structs are public JSON contracts because `opshttp` returns them directly. JSON field names and meanings are stable within a major version. Minor versions may add fields, so clients should ignore unknown fields.
+`RuntimeStatus`, `WorkerSnapshot`, `WorkerStatus`, `CommandInfo`, and nested
+status structs are public inspection contracts. Their JSON tags support callers
+that serialize snapshots, but generic Kit Series HTTP inspection is presented
+through Opskit and Servekit rather than a Workerkit-specific read API.
 
 ### Lifecycle states
 
@@ -693,24 +696,11 @@ them. These constructors adapt those hooks into ordinary Workerkit workers.
 
   The caller provided a nil Servekit server.
 
-### Readiness
-
-- `ReadinessCheck(...)`
-
-  Deprecated compatibility adapter for Servekit readiness checks. Prefer
-  registering the runtime with Opskit and passing the registry to Servekit with
-  `servekit.WithOps`.
-
 ### Route groups
 
-By default, `Mount(...)` adds only read-only routes:
-
-- `GET /admin/runtime`
-- `GET /admin/workers`
-- `GET /admin/worker?name=runtime/worker`
-- `GET /admin/commands?worker=runtime/worker`
-
-Even the read-only routes expose operational state, worker names, command inventory, and failure information, so mount them only on an appropriate operations surface.
+By default, `Mount(...)` adds no routes. Passive status, readiness, and
+inspection flow through Opskit and Servekit. Enable only the Workerkit control
+groups the application needs.
 
 Command dispatch is mutating and opt-in:
 
@@ -748,25 +738,32 @@ Lifecycle controls are privileged and opt-in:
 
 ## Package `servekitservice`
 
-`servekitservice` wires Workerkit and Servekit together for the common microservice execution path. The managed path registers the Workerkit runtime with Opskit so Servekit can consume readiness and inspection through `servekit.WithOps`.
+`servekitservice` optionally coordinates Workerkit lifecycle around an
+application-owned Servekit server. Applications construct their shared Opskit
+registry and Servekit presentation explicitly.
 
 ### Constructors
 
-- `NewManaged(...)`
-
-  Constructs a service with a Servekit server and Workerkit readiness wired into `/readyz` through Opskit. If the application has a shared Opskit registry, pass it with `WithOpsRegistry(...)`; otherwise `NewManaged` creates a private registry as a convenience.
-
 - `New(...)`
 
-  Wraps an existing Servekit server. In composed Kit Series services, construct the server with an Opskit registry that contains the Workerkit runtime and pass it with `servekit.WithOps(...)`.
+  Constructs a lifecycle coordinator around an existing Servekit server. It
+  does not create a registry, register components, or mount routes.
 
 - `Service`
 
-  Owns the common Workerkit plus Servekit microservice lifecycle.
+  Coordinates the Workerkit plus Servekit microservice lifecycle.
 
 - `Server()`
 
-  Returns the Servekit server owned by the service so callers using `NewManaged` can register application routes before `Run`.
+  Returns the application-owned Servekit server passed to `New`.
+
+- `ErrNilRuntime`
+
+  The caller provided a nil Workerkit runtime.
+
+- `ErrNilServer`
+
+  The caller provided a nil Servekit server.
 
 ### Running
 
@@ -774,31 +771,7 @@ Lifecycle controls are privileged and opt-in:
 
   Starts workers, runs Servekit, and performs graceful worker shutdown when configured.
 
-- `ReadinessOptions(...)`
-
-  Returns Servekit options that register Workerkit runtime readiness with Servekit through a private Opskit registry.
-
-- `ReadinessCheck(...)`
-
-  Deprecated compatibility adapter for standalone Servekit readiness checks when an Opskit registry is not used.
-
 ### Options
-
-- `WithServekitOptions(opts ...servekit.Option)`
-
-  Appends options used when `NewManaged` constructs the Servekit server. `New` rejects this option because the caller already supplied a server. Use `WithOpsRegistry(...)` instead of passing `servekit.WithOps(...)` through this option.
-
-- `WithOpsRegistry(registry *opskit.Registry, opts ...servekit.OpsOption)`
-
-  Configures the Opskit registry `NewManaged` passes to Servekit. `NewManaged` registers the Workerkit runtime into this registry as a required component. If omitted, `NewManaged` creates a private registry for Workerkit-only readiness.
-
-- `WithOpsHTTPEnabled(enabled bool)`
-
-  Controls whether Workerkit ops HTTP routes are mounted. Ops HTTP is disabled by default.
-
-- `WithOpsHTTPOptions(opts ...opshttp.Option)`
-
-  Appends options used when mounting Workerkit ops HTTP routes.
 
 - `WithStartWorkers(enabled bool)`
 
@@ -965,8 +938,7 @@ If you are new to the codebase:
 3. [Examples Directory](../examples/README.md)
 4. [`examples/opskit-checks`](../examples/opskit-checks)
 5. [`examples/opskit-command`](../examples/opskit-command)
-6. [`examples/managed-service`](../examples/managed-service)
-7. [`examples/production-composition`](../examples/production-composition)
+6. [`examples/production-composition`](../examples/production-composition)
 
 Read the `opshttp` examples separately when Workerkit-specific HTTP controls
 are relevant to the deployment.

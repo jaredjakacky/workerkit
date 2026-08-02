@@ -3,7 +3,6 @@ package opshttp_test
 import (
 	"context"
 	"errors"
-	. "github.com/jaredjakacky/workerkit/opshttp"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/jaredjakacky/servekit"
 	workerkit "github.com/jaredjakacky/workerkit"
+	. "github.com/jaredjakacky/workerkit/opshttp"
 )
 
 func TestMountValidatesInputs(t *testing.T) {
@@ -27,7 +27,7 @@ func TestMountValidatesInputs(t *testing.T) {
 	}
 }
 
-func TestMountRegistersStatusRoutesByDefault(t *testing.T) {
+func TestMountRegistersNoRoutesByDefault(t *testing.T) {
 	t.Parallel()
 
 	rt := newLifecycleRuntime(t, "ops", map[string]workerkit.Worker{
@@ -38,10 +38,10 @@ func TestMountRegistersStatusRoutesByDefault(t *testing.T) {
 		t.Fatalf("Mount returned error: %v", err)
 	}
 
-	assertRouteStatus(t, server, http.MethodGet, "/admin/runtime", "", http.StatusOK)
-	assertRouteStatus(t, server, http.MethodGet, "/admin/workers", "", http.StatusOK)
-	assertRouteStatus(t, server, http.MethodGet, "/admin/worker?name=worker", "", http.StatusOK)
-	assertRouteStatus(t, server, http.MethodGet, "/admin/commands?worker=worker", "", http.StatusOK)
+	assertRouteStatus(t, server, http.MethodGet, "/admin/runtime", "", http.StatusNotFound)
+	assertRouteStatus(t, server, http.MethodGet, "/admin/workers", "", http.StatusNotFound)
+	assertRouteStatus(t, server, http.MethodGet, "/admin/worker?name=worker", "", http.StatusNotFound)
+	assertRouteStatus(t, server, http.MethodGet, "/admin/commands?worker=worker", "", http.StatusNotFound)
 	assertRouteStatus(t, server, http.MethodPost, "/admin/commands/dispatch", `{}`, http.StatusNotFound)
 	assertRouteStatus(t, server, http.MethodPost, "/admin/workers/start", `{"name":"worker"}`, http.StatusNotFound)
 }
@@ -49,27 +49,31 @@ func TestMountRegistersStatusRoutesByDefault(t *testing.T) {
 func TestMountUsesCustomPrefix(t *testing.T) {
 	t.Parallel()
 
-	rt := newLifecycleRuntime(t, "ops", nil)
+	rt := newLifecycleRuntime(t, "ops", map[string]workerkit.Worker{
+		"worker": &lifecycleWorker{},
+	})
 	server := servekit.New()
-	if err := Mount(server, rt, WithPrefix(" ops/ ")); err != nil {
+	if err := Mount(server, rt, WithPrefix(" ops/ "), WithAdminLifecycleControlsEnabled()); err != nil {
 		t.Fatalf("Mount returned error: %v", err)
 	}
 
-	assertRouteStatus(t, server, http.MethodGet, "/ops/runtime", "", http.StatusOK)
-	assertRouteStatus(t, server, http.MethodGet, "/admin/runtime", "", http.StatusNotFound)
+	assertRouteStatus(t, server, http.MethodPost, "/ops/workers/start", `{"name":"worker"}`, http.StatusOK)
+	assertRouteStatus(t, server, http.MethodPost, "/admin/workers/start", `{"name":"worker"}`, http.StatusNotFound)
 }
 
 func TestMountUsesRootPrefix(t *testing.T) {
 	t.Parallel()
 
-	rt := newLifecycleRuntime(t, "ops", nil)
+	rt := newLifecycleRuntime(t, "ops", map[string]workerkit.Worker{
+		"worker": &lifecycleWorker{},
+	})
 	server := servekit.New()
-	if err := Mount(server, rt, WithPrefix("")); err != nil {
+	if err := Mount(server, rt, WithPrefix(""), WithAdminLifecycleControlsEnabled()); err != nil {
 		t.Fatalf("Mount returned error: %v", err)
 	}
 
-	assertRouteStatus(t, server, http.MethodGet, "/runtime", "", http.StatusOK)
-	assertRouteStatus(t, server, http.MethodGet, "/admin/runtime", "", http.StatusNotFound)
+	assertRouteStatus(t, server, http.MethodPost, "/workers/start", `{"name":"worker"}`, http.StatusOK)
+	assertRouteStatus(t, server, http.MethodPost, "/admin/workers/start", `{"name":"worker"}`, http.StatusNotFound)
 }
 
 func TestMountAppliesEndpointDispatchAndLifecycleOptions(t *testing.T) {
@@ -103,12 +107,6 @@ func TestMountAppliesEndpointDispatchAndLifecycleOptions(t *testing.T) {
 		t.Fatalf("Mount returned error: %v", err)
 	}
 
-	status := serveHTTP(server, http.MethodGet, "/admin/runtime", "")
-	assertStatus(t, status, http.StatusOK)
-	assertHeader(t, status, "X-Ops-Endpoint", "true")
-	assertHeader(t, status, "X-Ops-Dispatch", "")
-	assertHeader(t, status, "X-Ops-Lifecycle", "")
-
 	dispatch := serveHTTP(server, http.MethodPost, "/admin/commands/dispatch", `{"worker":"command-worker","name":"echo","payload":{}}`)
 	assertStatus(t, dispatch, http.StatusOK)
 	assertHeader(t, dispatch, "X-Ops-Endpoint", "true")
@@ -120,34 +118,6 @@ func TestMountAppliesEndpointDispatchAndLifecycleOptions(t *testing.T) {
 	assertHeader(t, lifecycle, "X-Ops-Endpoint", "true")
 	assertHeader(t, lifecycle, "X-Ops-Dispatch", "")
 	assertHeader(t, lifecycle, "X-Ops-Lifecycle", "true")
-}
-
-func TestReadinessCheck(t *testing.T) {
-	t.Parallel()
-
-	check := ReadinessCheck(nil)
-	if err := check(context.Background()); !errors.Is(err, ErrNilRuntime) {
-		t.Fatalf("nil runtime readiness error = %v, want ErrNilRuntime", err)
-	}
-
-	rt := newLifecycleRuntime(t, "ops", map[string]workerkit.Worker{
-		"worker": &lifecycleWorker{},
-	})
-	check = ReadinessCheck(rt)
-	err := check(context.Background())
-	if err == nil {
-		t.Fatal("readiness check returned nil for non-ready runtime")
-	}
-	if !strings.Contains(err.Error(), "worker runtime not ready") {
-		t.Fatalf("readiness error = %q, want not-ready message", err.Error())
-	}
-
-	if err := rt.Start(context.Background(), "worker"); err != nil {
-		t.Fatalf("Start returned error: %v", err)
-	}
-	if err := check(context.Background()); err != nil {
-		t.Fatalf("readiness check returned error after start: %v", err)
-	}
 }
 
 func headerMiddleware(key string, value string) servekit.EndpointOption {

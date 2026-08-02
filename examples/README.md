@@ -1,6 +1,6 @@
 # Workerkit Examples
 
-Workerkit is a transport-agnostic worker runtime for Go. These examples are the fastest way to understand what that means in practice — starting from a single worker with graceful shutdown, ending with a production-grade composition that includes retries, concurrency limits, failure policy, structured observability, HTTP ops, and Kubernetes-ready lifecycle management.
+Workerkit is a transport-agnostic worker runtime for Go. These examples are the fastest way to understand what that means in practice — starting from a single worker with graceful shutdown, ending with a production-grade composition that includes retries, concurrency limits, failure policy, structured observability, shared Opskit presentation, and Kubernetes-ready lifecycle management.
 
 Every example is runnable. Every example is part of the public documentation. None of them are smoke tests.
 
@@ -46,17 +46,12 @@ Read the examples in the order listed below. Each one builds on the last. By the
 
 ### Primary Kit Series Composition
 
-**[managed-service](managed-service)** — The preferred microservice shell. `servekitservice.NewManaged` wires Workerkit readiness into Servekit through Opskit automatically, starts workers before serving, and drains and stops them gracefully on shutdown. Add application routes through `Service.Server()` while Workerkit owns worker lifecycle.
-
-**[production-composition](production-composition)** — The full composition. Multiple workers, a shared Opskit registry, Servekit `/readyz` and generic admin component inspection, commands, retry, concurrency limits, failure policy, slog observability, opt-in command dispatch, and graceful shutdown.
+**[production-composition](production-composition)** — The full composition. Multiple workers, an explicitly shared Opskit registry, Servekit `/readyz` and generic admin component inspection, commands, retry, concurrency limits, failure policy, slog observability, and optional lifecycle coordination around the application-owned server.
 
 ### Optional Workerkit HTTP Controls
 
 These examples are not the primary Kit Series composition path. They exist for
-deployments that specifically need Workerkit-shaped inspection or privileged
-remote controls.
-
-**[opshttp-basic](opshttp-basic)** — Standalone Workerkit-specific read-only routes. Generic Opskit admin component routes remain the preferred composed read path. No lifecycle mutation is enabled.
+deployments that specifically need privileged remote controls.
 
 **[opshttp-commands](opshttp-commands)** — Opt-in HTTP command dispatch. Includes success paths, invalid request handling, missing target mapping, saturation responses, and how to apply endpoint policy to the dispatch route specifically.
 

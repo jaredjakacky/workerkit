@@ -100,28 +100,16 @@ specific order around Workerkit shutdown.
 
 ## Selective Ops HTTP Exposure
 
-`opshttp.Mount` exposes read-only routes by default. Mutating routes are
-opt-in.
+`opshttp.Mount` adds no routes by default. Explicitly enable command dispatch or
+lifecycle controls only on protected operations surfaces. Passive readiness,
+status, and inspection flow through the shared Opskit registry and Servekit.
+Servekit endpoint options are the right place for HTTP policy.
 
-Use read-only routes for inspection:
+## Lifecycle Coordinator Versus Direct Lifecycle
 
-- runtime status
-- workers
-- one worker
-- commands
-
-Use command dispatch or lifecycle controls only on protected operations
-surfaces. Servekit endpoint options are the right place for HTTP policy.
-
-## Managed Service Versus Manual Service
-
-Use `servekitservice.NewManaged` for the normal service shell. It constructs a
-Servekit server, wires readiness, starts workers, and coordinates graceful
-shutdown. Servekit owns the HTTP service lifecycle; Workerkit owns worker
-runtime semantics.
-
-Use `servekitservice.New` when you already have a Servekit server and want to
-bind a Workerkit runtime into it.
+Construct the shared Opskit registry and Servekit server in the application.
+Use `servekitservice.New` when its start-serve-drain-stop sequencing is useful.
+The coordinator does not construct the server, wire readiness, or mount routes.
 
 Use direct `Runtime` methods when there is no HTTP service.
 
@@ -164,9 +152,9 @@ service boundary.
 3. Add commands only for real domain operations.
 4. Add bounded retry and concurrency limits.
 5. Add `slogobserver` or `otel`.
-6. Use `servekitservice.NewManaged` for the service shell.
-7. Add read-only `opshttp` routes if operators need HTTP inspection.
-8. Add mutating ops routes only with real endpoint policy.
+6. Register the runtime in the shared Opskit registry and present it with Servekit.
+7. Optionally use `servekitservice.New` for lifecycle coordination.
+8. Add `opshttp` controls only for a real operational need and with endpoint policy.
 
 ## Related Material
 
