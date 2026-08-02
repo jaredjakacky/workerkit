@@ -18,7 +18,6 @@ import (
 	opskit "github.com/jaredjakacky/opskit"
 	"github.com/jaredjakacky/servekit"
 	workerkit "github.com/jaredjakacky/workerkit"
-	"github.com/jaredjakacky/workerkit/opshttp"
 	"github.com/jaredjakacky/workerkit/retry"
 	"github.com/jaredjakacky/workerkit/servekitservice"
 	"github.com/jaredjakacky/workerkit/slogobserver"
@@ -65,15 +64,6 @@ func main() {
 	ops := opskit.NewRegistry()
 	ops.MustRegister(runtime, opskit.Required())
 
-	opsPolicy := []servekit.EndpointOption{
-		servekit.WithAuthGate(requireOpsToken),
-		servekit.WithEndpointMiddleware(auditOpsRequest(logger)),
-		servekit.WithEndpointTimeout(10 * time.Second),
-	}
-	mutatingOpsPolicy := []servekit.EndpointOption{
-		servekit.WithBodyLimit(1 << 20),
-	}
-
 	server := servekit.New(
 		servekit.WithAddr(":8080"),
 		servekit.WithBuildInfo("dev", "local", time.Now().UTC().Format(time.RFC3339)),
@@ -83,20 +73,10 @@ func main() {
 		),
 	)
 
-	// Opskit is the primary read-only integration path. This example opts into
-	// command dispatch, but leaves privileged lifecycle controls disabled.
-	opsOptions := []opshttp.Option{
-		// Apply the shared operations policy to every Workerkit-specific route.
-		opshttp.WithEndpointOptions(opsPolicy...),
-		opshttp.WithCommandDispatchEnabled(),
-		// Command dispatch is intentionally opt-in and should be protected with real
-		// authentication, authorization, and audit logging in production.
-		opshttp.WithDispatchOptions(mutatingOpsPolicy...),
-	}
-
+	// The lifecycle coordinator starts workers before Servekit and drains them
+	// after it exits. It does not create registries, presentation routes, or
+	// privileged controls; those remain explicit application composition choices.
 	service, err := servekitservice.New(runtime, server,
-		servekitservice.WithOpsHTTPEnabled(true),
-		servekitservice.WithOpsHTTPOptions(opsOptions...),
 		servekitservice.WithShutdownTimeout(20*time.Second),
 	)
 	if err != nil {
@@ -354,19 +334,6 @@ func requireOpsToken(r *http.Request) error {
 	return nil
 }
 
-func auditOpsRequest(logger *slog.Logger) servekit.Middleware {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			logger.Info("ops route requested",
-				"method", r.Method,
-				"path", r.URL.Path,
-				"remote", r.RemoteAddr,
-			)
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
 func mustJSON(v any) []byte {
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -382,7 +349,5 @@ func printCurlCommands() {
 	fmt.Println("  curl -i http://localhost:8080/readyz")
 	fmt.Println("  curl -s -H 'X-Ops-Token: dev-secret' http://localhost:8080/admin/components")
 	fmt.Println("  curl -s -H 'X-Ops-Token: dev-secret' http://localhost:8080/admin/components/catalog_service")
-	fmt.Println(`  curl -i -X POST http://localhost:8080/admin/commands/dispatch -H 'Content-Type: application/json' -H 'X-Ops-Token: dev-secret' -d '{"worker":"ingest","name":"ingest/enqueue","payload":{"documentID":"doc-123","title":"Workerkit"}}'`)
-	fmt.Println(`  curl -i -X POST http://localhost:8080/admin/commands/dispatch -H 'Content-Type: application/json' -H 'X-Ops-Token: dev-secret' -d '{"worker":"index","name":"index/rebuild"}'`)
-	fmt.Println("privileged lifecycle controls are intentionally not enabled")
+	fmt.Println("Workerkit-specific command and lifecycle HTTP controls are intentionally not mounted")
 }

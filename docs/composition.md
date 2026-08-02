@@ -123,42 +123,35 @@ controller.
 Cluster-wide controls require a separate control-plane design. Do not assume an
 HTTP request through a Kubernetes Service controls every pod in a Deployment.
 
-## Managed Service Path
+## Optional Lifecycle Coordination
 
-Use `servekitservice.NewManaged` when a Workerkit runtime belongs inside a
-Servekit-backed HTTP service:
+Applications own composition: construct the shared Opskit registry and
+Servekit server explicitly. Use `servekitservice.New` only when the small
+start-serve-drain-stop lifecycle coordinator is useful:
 
 ```go
 ops := opskit.NewRegistry()
+ops.MustRegister(runtime, opskit.Required())
 
-service, err := servekitservice.NewManaged(runtime,
-	servekitservice.WithOpsRegistry(ops, servekit.WithOpsAdmin()),
-	servekitservice.WithServekitOptions(
-		servekit.WithAddr(":8080"),
-	),
+server := servekit.New(
+	servekit.WithAddr(":8080"),
+	servekit.WithOps(ops, servekit.WithOpsAdmin()),
+)
+
+service, err := servekitservice.New(runtime, server,
+	servekitservice.WithShutdownTimeout(20*time.Second),
 )
 if err != nil {
 	return err
 }
 
-server := service.Server()
+return service.Run(ctx)
 ```
 
-`NewManaged` runs the Servekit service shell and coordinates Workerkit startup
-and graceful shutdown. It wires Workerkit readiness into Servekit through
-Opskit. Workerkit still owns worker semantics; Servekit still owns HTTP serving
-and `/readyz`.
-
-If `WithOpsRegistry` is omitted, `NewManaged` creates a private Opskit registry
-for convenience. Composed Kit Series services should pass the application's
-shared registry so Workerkit, Configkit, Clientkit, Dependkit, and other
-components appear in one Opskit read model.
-
-Do not pre-register the Workerkit runtime in that registry when using
-`NewManaged`; `NewManaged` registers it as a required Opskit component.
-
-`Service.Server()` exposes the Servekit server so the application can register
-normal HTTP routes.
+The coordinator starts registered workers before serving and gracefully drains
+and stops them after Servekit exits. It does not construct the server, create a
+registry, register components, or mount routes. `Service.Server()` returns the
+same application-owned server.
 
 ## Readiness and Read-Only Inspection
 
@@ -171,27 +164,12 @@ The preferred path is Opskit:
 Servekit owns the HTTP endpoint that reports readiness. Workerkit owns the
 readiness semantics. Opskit is the shared contract between them.
 
-`servekitservice.ReadinessOptions(runtime)` also returns a Servekit option that
-creates a small private Opskit registry for Workerkit-only readiness. The older
-`opshttp.ReadinessCheck(runtime)` adapter remains available for standalone
-Servekit users who do not want an Opskit registry.
-
 ## Optional Workerkit-Specific HTTP Operations
 
-Use `opshttp.Mount` when you need Workerkit-specific HTTP routes. These are not
-the primary composed read-only path, but they remain useful for command dispatch
-and privileged lifecycle controls.
-
-`opshttp.Mount` exposes read-only Workerkit-specific routes by default:
-
-- `GET /admin/runtime`
-- `GET /admin/workers`
-- `GET /admin/worker?name=...`
-- `GET /admin/commands?worker=...`
-
-Read-only routes still expose operational information. Prefer generic Opskit
-admin routes for composed services, and mount `opshttp` only when these
-Workerkit-specific routes are useful.
+Use `opshttp.Mount` only when operators need Workerkit-specific command dispatch
+or privileged lifecycle controls. It adds no routes by default; each control
+group must be explicitly enabled. Passive status, readiness, and inspection
+belong to the shared Opskit registry and Servekit's generic routes.
 
 ## Command Dispatch
 
@@ -249,8 +227,8 @@ with authentication, authorization, request limits, route-specific timeouts,
 and audit logging. These are pod-local controls, not Deployment-wide controls.
 
 The stop routes do not wait for or cancel commands already in flight. For a
-graceful HTTP sequence, drain, poll the worker or runtime status until
-`inFlight` is zero, then stop.
+graceful HTTP sequence, drain, inspect the runtime through the generic Opskit
+component route until `inFlight` is zero, then stop.
 
 ## Endpoint Policy
 
@@ -273,12 +251,10 @@ opshttp.Mount(server, runtime,
 
 Keep authentication, authorization, audit logging, request limits, and
 route-specific timeouts in Servekit. Use `WithEndpointOptions` for policy that
-belongs on the whole operations surface, including read-only inspection routes.
-Keep worker semantics in Workerkit.
+belongs on every enabled Workerkit control route. Keep worker semantics in
+Workerkit.
 
 ## When to Enable Ops HTTP
-
-Enable read-only ops routes when operators need HTTP inspection.
 
 Enable command dispatch only when remote command execution is a real
 operational need and the route can be protected.
@@ -290,13 +266,11 @@ readiness.
 
 ## Examples
 
-- [`examples/managed-service`](../examples/managed-service)
 - [`examples/opskit-checks`](../examples/opskit-checks)
 - [`examples/opskit-command`](../examples/opskit-command)
 - [`examples/production-composition`](../examples/production-composition)
 
 Optional Workerkit-specific HTTP controls:
 
-- [`examples/opshttp-basic`](../examples/opshttp-basic)
 - [`examples/opshttp-commands`](../examples/opshttp-commands)
 - [`examples/admin-lifecycle`](../examples/admin-lifecycle)

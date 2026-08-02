@@ -224,15 +224,16 @@ Core commands are transport-neutral.
 
 `opshttp` adapts them to HTTP when mounted into Servekit:
 
-- `GET /admin/commands?worker=...` discovers commands
 - `POST /admin/commands/dispatch` dispatches commands when enabled
 
 Command dispatch over HTTP is opt-in because it can mutate state or trigger
-domain work. Protect it with authentication, authorization, and audit logging.
+domain work. Generic component inspection remains the Opskit and Servekit path.
+Protect dispatch with authentication, authorization, and audit logging.
 
 ## Examples
 
 - [`examples/commands`](../examples/commands)
 - [`examples/retry-policy`](../examples/retry-policy)
 - [`examples/concurrency-limits`](../examples/concurrency-limits)
+- [`examples/opskit-command`](../examples/opskit-command)
 - [`examples/opshttp-commands`](../examples/opshttp-commands)

@@ -10,14 +10,6 @@ import (
 	"github.com/jaredjakacky/servekit"
 )
 
-func requiredQueryValue(r *http.Request, key string) (string, error) {
-	value := r.URL.Query().Get(key)
-	if value == "" {
-		return "", badRequestError(fmt.Sprintf("missing required query parameter %q", key))
-	}
-	return value, nil
-}
-
 func decodeStrictJSON(r *http.Request, dst any, label string) error {
 	if r.Body == nil {
 		return badRequestError("request body must contain JSON")

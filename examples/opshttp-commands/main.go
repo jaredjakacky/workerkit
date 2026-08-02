@@ -72,8 +72,8 @@ func main() {
 
 	// This example demonstrates opt-in HTTP command dispatch: Servekit owns HTTP
 	// encoding, endpoint policy, and status codes, while Workerkit owns command
-	// routing and policy. Mount also exposes read-only operations routes; mount
-	// those only on an appropriate operations surface.
+	// routing and policy. Mount adds only the explicitly enabled control route;
+	// passive status and inspection continue to flow through Opskit and Servekit.
 	if err := opshttp.Mount(server, runtime,
 		opshttp.WithCommandDispatchEnabled(),
 		opshttp.WithDispatchOptions(dispatchPolicy...),

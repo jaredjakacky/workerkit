@@ -235,11 +235,12 @@ Start with direct runtime usage and tests. Add worker commands only when the
 worker has real domain operations worth exposing. Add retry and concurrency
 policy where repeated work is safe and overload needs backpressure.
 
-Use Servekit through `servekitservice.NewManaged` when Workerkit is part of an
-HTTP service. In composed Kit Series services, register the runtime with Opskit
-and pass that registry to Servekit for `/readyz` and generic admin inspection.
-Use `opshttp` when you need Workerkit-specific HTTP command dispatch or
-privileged lifecycle controls.
+When Workerkit is part of an HTTP service, register the runtime with the shared
+Opskit registry and pass that registry to Servekit for `/readyz` and generic
+admin inspection. Optionally use `servekitservice.New` to coordinate Workerkit
+startup and shutdown around the application-owned server. Use `opshttp` only
+when you need Workerkit-specific HTTP command dispatch or privileged lifecycle
+controls.
 
 ## Related Guides
 

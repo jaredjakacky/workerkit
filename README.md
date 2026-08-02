@@ -239,7 +239,7 @@ Workerkit has a short normal path, but it is not limited to startup and shutdown
 - OpenTelemetry observer support
 - Opskit-backed readiness and generic admin inspection through Servekit
 - opt-in HTTP command dispatch and privileged lifecycle controls
-- managed Servekit service composition with `servekitservice.NewManaged`
+- optional Workerkit lifecycle coordination around an application-owned Servekit server
 
 The advanced path is documented in [docs/advanced.md](docs/advanced.md), with policy details in [docs/policy.md](docs/policy.md) and Servekit composition in [docs/composition.md](docs/composition.md).
 
@@ -294,15 +294,12 @@ if err := runtime.Register(commandWorker,
 
 `NewCheckLoop` and `NewCheckGroupLoop` return normal Workerkit workers. Workerkit owns their interval, jitter, cooperative timeout, cancellation, panic recovery, and readiness/failure integration. A checker cannot be forcibly interrupted, but a result returned after its deadline is not applied to readiness. `CommandFromOpskit` returns a normal command spec, so dispatch keeps Workerkit admission, timeout, retry, concurrency, panic, observation, and lifecycle behavior.
 
-`opshttp` is an optional Workerkit-specific HTTP control surface. It is useful when operators specifically need Workerkit command dispatch or privileged lifecycle controls; it is not the primary read-only/readiness composition path. Mutating routes are disabled unless explicitly enabled.
+`opshttp` is an optional Workerkit-specific HTTP control surface. It is useful when operators specifically need Workerkit command dispatch or privileged lifecycle controls; it is not the primary read-only/readiness composition path. No routes are mounted unless a control group is explicitly enabled.
 
-`opshttp.Mount` adds Workerkit-shaped read-only inspection by default. Command
-dispatch and lifecycle controls require explicit options. Even read-only routes
-expose operational state, so protect the entire mounted surface; use stricter
-Servekit endpoint policy for mutating routes. HTTP controls are pod-local, and
-stop routes do not wait for commands already in flight.
-
-The standalone `opshttp.ReadinessCheck(runtime)` adapter remains available only for standalone Servekit services that do not use an Opskit registry.
+`opshttp.Mount` adds no routes by default. Command dispatch and lifecycle
+controls require explicit options and appropriate Servekit endpoint policy.
+HTTP controls are pod-local, and stop routes do not wait for commands already
+in flight.
 
 See [Composition with Opskit and Servekit](docs/composition.md) and the optional
 `opshttp` examples for route inventory, endpoint policy, and error mappings.
@@ -340,11 +337,9 @@ Recommended reading order:
 11. [`examples/testing`](examples/testing)
 12. [`examples/observability-slog`](examples/observability-slog)
 13. [`examples/observability-otel`](examples/observability-otel)
-14. [`examples/managed-service`](examples/managed-service)
-15. [`examples/production-composition`](examples/production-composition)
+14. [`examples/production-composition`](examples/production-composition)
 
 Optional Workerkit-specific HTTP controls are demonstrated separately in
-[`examples/opshttp-basic`](examples/opshttp-basic),
 [`examples/opshttp-commands`](examples/opshttp-commands), and
 [`examples/admin-lifecycle`](examples/admin-lifecycle).
 
