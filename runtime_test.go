@@ -160,8 +160,8 @@ func TestStopAllStopsFailedWorkersAndPreservesLastFailure(t *testing.T) {
 	if status.State != StateStopped {
 		t.Fatalf("worker state = %s, want %s", status.State, StateStopped)
 	}
-	if status.LastFailure == nil || status.LastFailure.Message != failure.Error() {
-		t.Fatalf("LastFailure = %#v, want %q", status.LastFailure, failure.Error())
+	if status.LastFailure == nil || status.LastFailure.Message != "worker operation failed" {
+		t.Fatalf("LastFailure = %#v, want generic public failure", status.LastFailure)
 	}
 }
 
@@ -241,8 +241,8 @@ func TestBackgroundReportFailureDuringStartMarksWorkerFailedWithoutStartError(t 
 	if snapshot.Status.State != StateStarting {
 		t.Fatalf("worker state during Start = %s, want %s", snapshot.Status.State, StateStarting)
 	}
-	if snapshot.Status.LastFailure == nil || snapshot.Status.LastFailure.Message != startFailure.Error() {
-		t.Fatalf("LastFailure during Start = %#v, want %q", snapshot.Status.LastFailure, startFailure.Error())
+	if snapshot.Status.LastFailure == nil || snapshot.Status.LastFailure.Message != "worker operation failed" {
+		t.Fatalf("LastFailure during Start = %#v, want generic public failure", snapshot.Status.LastFailure)
 	}
 	concurrentCtx, cancelConcurrent := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancelConcurrent()
@@ -264,8 +264,8 @@ func TestBackgroundReportFailureDuringStartMarksWorkerFailedWithoutStartError(t 
 	if status.State != StateFailed {
 		t.Fatalf("worker state = %s, want %s", status.State, StateFailed)
 	}
-	if status.LastFailure == nil || status.LastFailure.Message != startFailure.Error() {
-		t.Fatalf("LastFailure = %#v, want %q", status.LastFailure, startFailure.Error())
+	if status.LastFailure == nil || status.LastFailure.Message != "worker operation failed" {
+		t.Fatalf("LastFailure = %#v, want generic public failure", status.LastFailure)
 	}
 	events := observer.snapshot()
 	var transitions []string
@@ -338,8 +338,8 @@ func TestFailedWorkerFailureDoesNotEmitDuplicateLifecycleFailureEvent(t *testing
 	if status.State != StateFailed {
 		t.Fatalf("worker state = %s, want %s", status.State, StateFailed)
 	}
-	if status.LastFailure == nil || status.LastFailure.Message != returnedFailure.Error() {
-		t.Fatalf("LastFailure = %#v, want %q", status.LastFailure, returnedFailure.Error())
+	if status.LastFailure == nil || status.LastFailure.Message != "worker operation failed" {
+		t.Fatalf("LastFailure = %#v, want generic public failure", status.LastFailure)
 	}
 
 	events := observer.snapshot()
@@ -355,8 +355,8 @@ func TestFailedWorkerFailureDoesNotEmitDuplicateLifecycleFailureEvent(t *testing
 	if got := len(events.failures); got != 1 {
 		t.Fatalf("failure events = %d, want 1", got)
 	}
-	if !errors.Is(events.failures[0].Err, reportedFailure) {
-		t.Fatalf("failure event error = %v, want %v", events.failures[0].Err, reportedFailure)
+	if !errors.Is(events.failures[0].Cause, reportedFailure) {
+		t.Fatalf("failure event cause = %v, want %v", events.failures[0].Cause, reportedFailure)
 	}
 	if events.failures[0].Command != "" {
 		t.Fatalf("failure event command = %q, want empty", events.failures[0].Command)
@@ -423,8 +423,8 @@ func TestCommandRetryEmitsFailurePerFailedAttemptAndSuccessfulCommandEnd(t *test
 	if !events.commandEnds[0].Success {
 		t.Fatalf("command end success = false, want true: %#v", events.commandEnds[0])
 	}
-	if events.commandEnds[0].Err != nil {
-		t.Fatalf("command end error = %v, want nil", events.commandEnds[0].Err)
+	if events.commandEnds[0].Cause != nil {
+		t.Fatalf("command end cause = %v, want nil", events.commandEnds[0].Cause)
 	}
 }
 
@@ -435,13 +435,16 @@ func TestOpskitCommandFailureUsesRuntimeRetryAndObservation(t *testing.T) {
 	handler := opskit.CommandHandlerFunc(func(context.Context, opskit.CommandRequest) opskit.CommandResult {
 		attempts++
 		if attempts == 1 {
-			return opskit.FailedCommand("transient", errors.New("try again"), 0)
+			return opskit.FailedCommandWithFailure("transient", opskit.Failure{Code: "temporary", Message: "try again"}, 0)
 		}
 		return opskit.CompletedCommand("completed", map[string]bool{"ok": true}, 0)
 	})
 	err := rt.Register(
 		WorkerSpec{Name: "worker", Worker: testWorker{}},
-		WithWorkerCommandRetry(retrykit.Attempts(2, nil, nil)),
+		WithWorkerCommandRetry(retrykit.AttemptsIf(2, nil, nil, func(err error) bool {
+			var opsErr *OpskitCommandError
+			return errors.As(err, &opsErr) && opsErr.Failure.Code == "temporary"
+		})),
 		WithCommandSpec(CommandFromOpskit(opskit.CommandDescriptor{Name: "refresh", Idempotent: true}, handler)),
 	)
 	if err != nil {
@@ -459,12 +462,19 @@ func TestOpskitCommandFailureUsesRuntimeRetryAndObservation(t *testing.T) {
 		t.Fatalf("attempts = %d, result = %#v, want retried completed result", attempts, result)
 	}
 	events := observer.snapshot()
-	if len(events.failures) != 1 || !errors.Is(events.failures[0].Err, ErrOpsCommandFailed) {
+	if len(events.failures) != 1 || !errors.Is(events.failures[0].Cause, ErrOpsCommandFailed) {
 		t.Fatalf("failures = %#v, want one Opskit command failure", events.failures)
+	}
+	var opsErr *OpskitCommandError
+	if !errors.As(events.failures[0].Cause, &opsErr) || opsErr.Failure.Code != "temporary" {
+		t.Fatalf("failure cause = %#v, want temporary Opskit failure", events.failures[0].Cause)
 	}
 	worker, _ := rt.Worker("worker")
 	if worker.Status.LastCommandFailure == nil || worker.Status.LastCommandFailure.Command != "refresh" {
 		t.Fatalf("LastCommandFailure = %#v, want refresh failure", worker.Status.LastCommandFailure)
+	}
+	if worker.Status.LastCommandFailure.Code != "temporary" || worker.Status.LastCommandFailure.Message != "try again" {
+		t.Fatalf("LastCommandFailure = %#v, want explicit Opskit failure", worker.Status.LastCommandFailure)
 	}
 }
 
@@ -1429,12 +1439,13 @@ func TestDispatchCommandConcurrencyLimits(t *testing.T) {
 }
 
 func TestCommandPanicRecoverFailsWorkerAndReturnsError(t *testing.T) {
+	const secret = "postgres://user:pass@internal/config"
 	observer := &recordingObserver{}
 	rt := newTestRuntime(t, WithObserver(observer))
 	if err := rt.Register(
 		WorkerSpec{Name: "worker", Worker: testWorker{}},
 		WithCommand("panic", CommandHandlerFunc(func(context.Context, CommandRequest) (CommandResult, error) {
-			panic("boom")
+			panic("command failed for " + secret)
 		})),
 	); err != nil {
 		t.Fatalf("Register returned error: %v", err)
@@ -1450,6 +1461,9 @@ func TestCommandPanicRecoverFailsWorkerAndReturnsError(t *testing.T) {
 	if !strings.Contains(err.Error(), "recovered panic") {
 		t.Fatalf("Dispatch error = %v, want recovered panic", err)
 	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("Dispatch error exposed panic payload: %v", err)
+	}
 	snapshot := requireWorker(t, rt, "worker")
 	if snapshot.Status.State != StateFailed {
 		t.Fatalf("worker state = %s, want %s", snapshot.Status.State, StateFailed)
@@ -1459,6 +1473,9 @@ func TestCommandPanicRecoverFailsWorkerAndReturnsError(t *testing.T) {
 	}
 	if snapshot.Status.LastCommandFailure == nil || !strings.Contains(snapshot.Status.LastCommandFailure.Message, "recovered panic") {
 		t.Fatalf("LastCommandFailure = %#v, want recovered panic", snapshot.Status.LastCommandFailure)
+	}
+	if strings.Contains(snapshot.Status.LastFailure.Message, secret) || strings.Contains(snapshot.Status.LastCommandFailure.Message, secret) {
+		t.Fatalf("worker status exposed panic payload: %#v", snapshot.Status)
 	}
 	events := observer.snapshot()
 	if got := len(events.failures); got != 1 {
@@ -1472,6 +1489,9 @@ func TestCommandPanicRecoverFailsWorkerAndReturnsError(t *testing.T) {
 	}
 	if !events.failures[0].Panic {
 		t.Fatal("failure panic = false, want true")
+	}
+	if events.failures[0].Cause == nil || strings.Contains(events.failures[0].Cause.Error(), secret) {
+		t.Fatalf("failure event exposed panic payload: %#v", events.failures[0])
 	}
 	if got := len(events.commandEnds); got != 1 {
 		t.Fatalf("command end events = %d, want 1", got)
@@ -1584,11 +1604,11 @@ func TestCommandErrorAfterStopRecordsCommandFailureWithoutChangingLifecycle(t *t
 	if snapshot.Status.LastFailure != nil {
 		t.Fatalf("LastFailure = %#v, want nil", snapshot.Status.LastFailure)
 	}
-	if snapshot.Status.LastCommandFailure == nil || snapshot.Status.LastCommandFailure.Message != commandErr.Error() {
-		t.Fatalf("LastCommandFailure = %#v, want %q", snapshot.Status.LastCommandFailure, commandErr.Error())
+	if snapshot.Status.LastCommandFailure == nil || snapshot.Status.LastCommandFailure.Message != "command failed" {
+		t.Fatalf("LastCommandFailure = %#v, want generic public failure", snapshot.Status.LastCommandFailure)
 	}
 	events := observer.snapshot()
-	if got := len(events.failures); got != 1 || events.failures[0].Panic || !errors.Is(events.failures[0].Err, commandErr) {
+	if got := len(events.failures); got != 1 || events.failures[0].Panic || !errors.Is(events.failures[0].Cause, commandErr) {
 		t.Fatalf("failure events = %#v, want one returned command error", events.failures)
 	}
 }
@@ -1656,7 +1676,7 @@ func TestStaleCommandErrorDoesNotMutateRestartedWorker(t *testing.T) {
 		t.Fatalf("runtime state/in-flight after stale command completion = %s/%d, want running/0", status.State, status.InFlight)
 	}
 	events := observer.snapshot()
-	if got := len(events.failures); got != 1 || !errors.Is(events.failures[0].Err, commandErr) {
+	if got := len(events.failures); got != 1 || !errors.Is(events.failures[0].Cause, commandErr) {
 		t.Fatalf("failure events = %#v, want stale command error observation", events.failures)
 	}
 	t.Cleanup(func() {
@@ -1704,8 +1724,8 @@ func TestCommandReportFailureWhileStoppingPreservesStoppingLifecycle(t *testing.
 	if snapshot.Status.State != StateStopping {
 		t.Fatalf("worker state = %s, want %s", snapshot.Status.State, StateStopping)
 	}
-	if snapshot.Status.LastFailure == nil || snapshot.Status.LastFailure.Message != failure.Error() {
-		t.Fatalf("LastFailure = %#v, want %q", snapshot.Status.LastFailure, failure.Error())
+	if snapshot.Status.LastFailure == nil || snapshot.Status.LastFailure.Message != "worker operation failed" {
+		t.Fatalf("LastFailure = %#v, want generic public failure", snapshot.Status.LastFailure)
 	}
 	if snapshot.Status.LastCommandFailure != nil {
 		t.Fatalf("LastCommandFailure = %#v, want nil", snapshot.Status.LastCommandFailure)
@@ -1714,7 +1734,7 @@ func TestCommandReportFailureWhileStoppingPreservesStoppingLifecycle(t *testing.
 		t.Fatalf("worker ready/accepting = %t/%t, want false/false", snapshot.Status.Ready, snapshot.Status.AcceptingWork)
 	}
 	events := observer.snapshot()
-	if got := len(events.failures); got != 1 || events.failures[0].Command != "" || events.failures[0].Panic || !errors.Is(events.failures[0].Err, failure) {
+	if got := len(events.failures); got != 1 || events.failures[0].Command != "" || events.failures[0].Panic || !errors.Is(events.failures[0].Cause, failure) {
 		t.Fatalf("failure events = %#v, want one worker failure", events.failures)
 	}
 
@@ -1726,8 +1746,8 @@ func TestCommandReportFailureWhileStoppingPreservesStoppingLifecycle(t *testing.
 	if snapshot.Status.State != StateStopped {
 		t.Fatalf("worker state = %s, want %s", snapshot.Status.State, StateStopped)
 	}
-	if snapshot.Status.LastFailure == nil || snapshot.Status.LastFailure.Message != failure.Error() {
-		t.Fatalf("LastFailure after Stop = %#v, want %q", snapshot.Status.LastFailure, failure.Error())
+	if snapshot.Status.LastFailure == nil || snapshot.Status.LastFailure.Message != "worker operation failed" {
+		t.Fatalf("LastFailure after Stop = %#v, want generic public failure", snapshot.Status.LastFailure)
 	}
 }
 

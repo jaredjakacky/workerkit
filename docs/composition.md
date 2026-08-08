@@ -158,7 +158,10 @@ same application-owned server.
 The preferred path is Opskit:
 
 - `Runtime.Status(ctx)` maps Workerkit lifecycle into Opskit's generic state vocabulary.
-- `Runtime.Readiness(ctx)` returns Workerkit's cached aggregate readiness.
+- `Runtime.Readiness(ctx)` returns Workerkit's authoritative cached aggregate
+  readiness plus worker-scoped child items. Item impact reflects Workerkit's
+  own worker contribution/failure policy; the parent component's required or
+  optional Opskit registration remains a separate registry-level decision.
 - `Runtime.Inspect(ctx)` returns safe Workerkit runtime and worker details for generic admin routes.
 
 Servekit owns the HTTP endpoint that reports readiness. Workerkit owns the

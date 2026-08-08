@@ -1181,6 +1181,7 @@ func completeWorkerStartStateError(name string, state workerState) error {
 }
 
 func (r *Runtime) failWorker(ctx context.Context, name string, generation uint64, err error, panicked bool) {
+	failure := operationalFailure(err, workerFailure)
 	r.mu.Lock()
 
 	state := r.workerStates[name]
@@ -1204,7 +1205,8 @@ func (r *Runtime) failWorker(ctx context.Context, name string, generation uint64
 	state.acceptingWorkSetDuringStart = false
 	state.failureReportedDuringStart = false
 	state.lastFailure = &FailureInfo{
-		Message: err.Error(),
+		Code:    failure.Code,
+		Message: failure.Message,
 		At:      now,
 	}
 	obs := r.commitWorkerStateLocked(name, before, state, now)
@@ -1224,6 +1226,7 @@ func (r *Runtime) reportWorkerFailure(ctx context.Context, name string, generati
 	if err == nil {
 		return nil
 	}
+	failure := operationalFailure(err, workerFailure)
 
 	r.mu.Lock()
 
@@ -1252,7 +1255,8 @@ func (r *Runtime) reportWorkerFailure(ctx context.Context, name string, generati
 		state.acceptingWorkSetDuringStart = false
 		state.failureReportedDuringStart = state.lifecycle == StateStarting
 		state.lastFailure = &FailureInfo{
-			Message: err.Error(),
+			Code:    failure.Code,
+			Message: failure.Message,
 			At:      now,
 		}
 		obs := r.commitWorkerStateLocked(name, before, state, now)
@@ -1275,7 +1279,8 @@ func (r *Runtime) reportWorkerFailure(ctx context.Context, name string, generati
 	state.acceptingWorkSetDuringStart = false
 	state.failureReportedDuringStart = false
 	state.lastFailure = &FailureInfo{
-		Message: err.Error(),
+		Code:    failure.Code,
+		Message: failure.Message,
 		At:      now,
 	}
 	obs := r.commitWorkerStateLocked(name, before, state, now)
@@ -1294,6 +1299,7 @@ func (r *Runtime) reportWorkerFailure(ctx context.Context, name string, generati
 // worker lifecycle or emitting an observer event. Lifecycle retry attempts use
 // this path so only terminal lifecycle failure increments failure observations.
 func (r *Runtime) recordWorkerFailureStatus(name string, generation uint64, err error) {
+	failure := operationalFailure(err, workerFailure)
 	r.mu.Lock()
 
 	state := r.workerStates[name]
@@ -1303,7 +1309,8 @@ func (r *Runtime) recordWorkerFailureStatus(name string, generation uint64, err 
 	}
 	now := time.Now()
 	state.lastFailure = &FailureInfo{
-		Message: err.Error(),
+		Code:    failure.Code,
+		Message: failure.Message,
 		At:      now,
 	}
 	r.workerStates[name] = state
@@ -1315,6 +1322,7 @@ func (r *Runtime) recordWorkerFailureStatus(name string, generation uint64, err 
 // use this path because domain command failures are not automatically worker
 // health failures.
 func (r *Runtime) recordCommandFailure(ctx context.Context, name string, generation uint64, command string, err error, dispatchID string, attempt int) {
+	failure := operationalFailure(err, commandFailure)
 	r.mu.Lock()
 
 	state := r.workerStates[name]
@@ -1322,7 +1330,8 @@ func (r *Runtime) recordCommandFailure(ctx context.Context, name string, generat
 	if state.generation == generation {
 		state.lastCommandFailure = &CommandFailureInfo{
 			Command: command,
-			Message: err.Error(),
+			Code:    failure.Code,
+			Message: failure.Message,
 			At:      now,
 		}
 		r.workerStates[name] = state
@@ -1333,6 +1342,7 @@ func (r *Runtime) recordCommandFailure(ctx context.Context, name string, generat
 }
 
 func (r *Runtime) recordCommandPanic(ctx context.Context, name string, generation uint64, command string, err error, dispatchID string, attempt int) {
+	failure := operationalFailure(err, commandFailure)
 	r.mu.Lock()
 
 	state := r.workerStates[name]
@@ -1342,7 +1352,8 @@ func (r *Runtime) recordCommandPanic(ctx context.Context, name string, generatio
 	if state.generation == generation {
 		state.lastCommandFailure = &CommandFailureInfo{
 			Command: command,
-			Message: err.Error(),
+			Code:    failure.Code,
+			Message: failure.Message,
 			At:      now,
 		}
 		switch state.lifecycle {
@@ -1360,7 +1371,8 @@ func (r *Runtime) recordCommandPanic(ctx context.Context, name string, generatio
 			state.acceptingWorkSetDuringStart = false
 			state.failureReportedDuringStart = false
 			state.lastFailure = &FailureInfo{
-				Message: err.Error(),
+				Code:    failure.Code,
+				Message: failure.Message,
 				At:      now,
 			}
 			obs = r.commitWorkerStateLocked(name, before, state, now)
@@ -1745,10 +1757,7 @@ func (r *Runtime) startCommandObservation(ctx context.Context, worker string, co
 
 func (r *Runtime) endCommandObservation(ctx context.Context, observation CommandObservation, worker string, command string, dispatchID string, attempts int, startedAt time.Time, err error) {
 	endedAt := time.Now()
-	message := ""
-	if err != nil {
-		message = err.Error()
-	}
+	failure := operationalFailure(err, commandFailure)
 	observation.End(ctx, CommandEndEvent{
 		Runtime:    r.identity.Name,
 		Worker:     worker,
@@ -1759,12 +1768,18 @@ func (r *Runtime) endCommandObservation(ctx context.Context, observation Command
 		EndedAt:    endedAt,
 		Duration:   endedAt.Sub(startedAt),
 		Success:    err == nil,
-		Err:        err,
-		Message:    message,
+		Code:       failure.Code,
+		Message:    failure.Message,
+		Cause:      err,
 	})
 }
 
 func (r *Runtime) observeFailure(ctx context.Context, worker string, command string, err error, panicked bool, at time.Time, dispatchID string, attempt int) {
+	fallback := workerFailure
+	if command != "" {
+		fallback = commandFailure
+	}
+	failure := operationalFailure(err, fallback)
 	r.observer().ObserveFailure(ctx, FailureEvent{
 		Runtime:    r.identity.Name,
 		Worker:     worker,
@@ -1772,8 +1787,9 @@ func (r *Runtime) observeFailure(ctx context.Context, worker string, command str
 		DispatchID: dispatchID,
 		Attempt:    attempt,
 		At:         at,
-		Err:        err,
-		Message:    err.Error(),
+		Code:       failure.Code,
+		Message:    failure.Message,
+		Cause:      err,
 		Panic:      panicked,
 	})
 }
@@ -1798,6 +1814,10 @@ func (r *Runtime) observeRuntimeChanges(ctx context.Context, before RuntimeStatu
 	r.observeReadinessChange(ctx, "", before.Ready, after.Ready, at)
 }
 
-func newRecoveredPanicError(operation string, recovered any) error {
-	return fmt.Errorf("recovered panic during %s: %v", operation, recovered)
+func newRecoveredPanicError(operation string, _ any) error {
+	message := fmt.Sprintf("recovered panic during %s", operation)
+	return WithOperationalFailure(nil, opskit.Failure{
+		Code:    FailureCodePanic,
+		Message: message,
+	})
 }

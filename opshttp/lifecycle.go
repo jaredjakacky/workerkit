@@ -107,7 +107,7 @@ func mapLifecycleError(kind, name string, err error) error {
 	case errors.Is(err, workerkit.ErrWorkerNotFound):
 		return notFoundError(kind, name)
 	case errors.Is(err, workerkit.ErrInvalidWorkerState):
-		return servekit.Error(http.StatusConflict, err.Error(), err)
+		return mappedOperationalError(http.StatusConflict, workerkit.ErrInvalidWorkerState.Error(), err)
 	default:
 		return err
 	}

@@ -206,7 +206,8 @@ func TestCommandEndRecordsFailureSpanAndMetrics(t *testing.T) {
 	observer, tracerProvider, meterProvider := newTestObserver(t)
 	startedAt := time.Date(2026, 5, 15, 10, 0, 0, 0, time.UTC)
 	endedAt := startedAt.Add(time.Second)
-	commandErr := errors.New("handler failed")
+	const secret = "postgres://user:pass@internal/commands"
+	commandErr := errors.New(secret)
 
 	ctx, observation := observer.StartCommand(context.Background(), workerkit.CommandStartEvent{
 		Runtime:   "runtime-a",
@@ -218,27 +219,30 @@ func TestCommandEndRecordsFailureSpanAndMetrics(t *testing.T) {
 		EndedAt:  endedAt,
 		Duration: time.Second,
 		Success:  false,
-		Err:      commandErr,
-		Message:  "handler failed",
+		Cause:    commandErr,
+		Code:     "command_failed",
+		Message:  "command failed",
 	})
 
 	span := tracerProvider.tracer.onlySpan(t)
 	if span.statusCode != codes.Error {
 		t.Fatalf("span status = %s, want %s", span.statusCode, codes.Error)
 	}
-	if span.statusDescription != "handler failed" {
+	if span.statusDescription != "command failed" {
 		t.Fatalf("span status description = %q", span.statusDescription)
 	}
-	if len(span.errors) != 1 || !errors.Is(span.errors[0].err, commandErr) {
-		t.Fatalf("recorded errors = %#v, want command error", span.errors)
+	if len(span.errors) != 1 || span.errors[0].err.Error() != "command failed" {
+		t.Fatalf("recorded errors = %#v, want safe command error", span.errors)
 	}
 	assertBoolAttr(t, span.attrs, "workerkit.command.success", false)
+	assertStringAttr(t, span.attrs, "workerkit.failure.code", "command_failed")
 
 	commandCount := meterProvider.meter.counter("workerkit.command.dispatches")
 	if got := commandCount.total(); got != 1 {
 		t.Fatalf("command count = %d, want 1", got)
 	}
 	assertBoolAttr(t, commandCount.adds[0].attrs, "workerkit.command.success", false)
+	assertStringAttr(t, commandCount.adds[0].attrs, "workerkit.failure.code", "command_failed")
 }
 
 func TestCommandEndRecordsMessageWhenErrorIsNil(t *testing.T) {
@@ -303,7 +307,8 @@ func TestObserveFailureRecordsEventStatusErrorAndMetric(t *testing.T) {
 	observer, _, meterProvider := newTestObserver(t)
 	parent := &recordingSpan{}
 	at := time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC)
-	failureErr := errors.New("worker failed")
+	const secret = "token=super-secret"
+	failureErr := errors.New(secret)
 
 	observer.ObserveFailure(trace.ContextWithSpan(context.Background(), parent), workerkit.FailureEvent{
 		Runtime:    "runtime-a",
@@ -312,8 +317,9 @@ func TestObserveFailureRecordsEventStatusErrorAndMetric(t *testing.T) {
 		DispatchID: "runtime-a-1",
 		Attempt:    2,
 		At:         at,
-		Err:        failureErr,
-		Message:    "worker failed",
+		Cause:      failureErr,
+		Code:       "worker_failed",
+		Message:    "worker operation failed",
 		Panic:      true,
 	})
 
@@ -327,15 +333,16 @@ func TestObserveFailureRecordsEventStatusErrorAndMetric(t *testing.T) {
 	assertStringAttr(t, event.attrs, "workerkit.command.dispatch_id", "runtime-a-1")
 	assertIntAttr(t, event.attrs, "workerkit.command.attempt", 2)
 	assertBoolAttr(t, event.attrs, "workerkit.failure.panic", true)
+	assertStringAttr(t, event.attrs, "workerkit.failure.code", "worker_failed")
 
 	if parent.statusCode != codes.Error {
 		t.Fatalf("span status = %s, want %s", parent.statusCode, codes.Error)
 	}
-	if parent.statusDescription != "worker failed" {
+	if parent.statusDescription != "worker operation failed" {
 		t.Fatalf("span status description = %q", parent.statusDescription)
 	}
-	if len(parent.errors) != 1 || !errors.Is(parent.errors[0].err, failureErr) {
-		t.Fatalf("recorded errors = %#v, want failure error", parent.errors)
+	if len(parent.errors) != 1 || parent.errors[0].err.Error() != "worker operation failed" {
+		t.Fatalf("recorded errors = %#v, want safe failure error", parent.errors)
 	}
 
 	counter := meterProvider.meter.counter("workerkit.failures")
@@ -343,6 +350,7 @@ func TestObserveFailureRecordsEventStatusErrorAndMetric(t *testing.T) {
 		t.Fatalf("failure metric count = %d, want 1", got)
 	}
 	assertBoolAttr(t, counter.adds[0].attrs, "workerkit.failure.panic", true)
+	assertStringAttr(t, counter.adds[0].attrs, "workerkit.failure.code", "worker_failed")
 	assertNoAttr(t, counter.adds[0].attrs, "workerkit.command.dispatch_id")
 	assertNoAttr(t, counter.adds[0].attrs, "workerkit.command.attempt")
 }

@@ -76,7 +76,9 @@ runtime.Register(spec,
 The adapter translates the request and marshals `opskit.CommandResult.Result`
 as JSON into Workerkit's result payload. It returns errors wrapping
 `ErrOpsCommandRejected` or `ErrOpsCommandFailed` for rejected and failed Opskit
-results. If the command context is canceled, the context error takes precedence.
+results. These errors are `*workerkit.OpskitCommandError` values and preserve a
+value copy of explicit `opskit.Failure` detail. If the command context is
+canceled, the context error takes precedence.
 
 An accepted Opskit result, including `AcceptedCommand` for asynchronous work,
 is a successful Workerkit dispatch. Workerkit releases its in-flight slot when
@@ -139,6 +141,14 @@ aggregate runtime status, the command handler can get the worker-scoped runtime
 handle with `WorkerRuntimeFromContext(ctx)` and call `ReportFailure(err)`.
 Returned command errors alone are recorded as command failures; they do not
 automatically move the worker lifecycle to failed.
+
+Arbitrary handler error text is private. Workerkit returns the original cause
+to the dispatch caller, but public status and built-in telemetry receive a
+generic `command_failed` presentation. Use `WithOperationalFailure` with an
+explicit safe `opskit.Failure` when operators need a more specific code or
+message. Custom observers may inspect `FailureEvent.Cause` and
+`CommandEndEvent.Cause`, but must not publish it without application-owned
+policy.
 
 Opskit rejected and failed results become command handler errors through
 `CommandFromOpskit`, so they follow the same failure recording, observation,
@@ -209,11 +219,27 @@ disabled command, policy refusal, or another permanent domain outcome. Retry
 `ErrOpsCommandFailed` only when the application can identify the failure as
 transient and repeating the command is safe.
 
+For explicit Opskit failure codes, a retry predicate can use `errors.As`:
+
+```go
+func isTemporary(err error) bool {
+	var opsErr *workerkit.OpskitCommandError
+	return errors.As(err, &opsErr) && opsErr.Failure.Code == "temporary"
+}
+```
+
+`CommandResult.Message` and `CommandResult.Payload` are result publication data,
+not a private diagnostics channel. They may flow through `opshttp`, admin tools,
+logs, support tooling, and tests. Return only content that is safe for the
+application's configured presentation surfaces.
+
 This is especially important for Opskit adapters: JSON result encoding happens
 after the domain handler returns. An encoding failure is reported as
-`ErrOpsCommandFailed` and may be retried by the configured policy even though
-the handler may already have produced side effects. The descriptor's
-`Idempotent` field is only metadata and does not alter retry behavior.
+`ErrOpsCommandFailed` with code `result_encoding_failed` and may be retried by
+the configured policy even though the handler may already have produced side
+effects. The arbitrary encoder error is retained only as the private
+`OpskitCommandError.Cause()` value. The descriptor's `Idempotent` field is only
+metadata and does not alter retry behavior.
 
 Command timeouts are cooperative: handlers receive a context deadline and must
 observe `ctx.Done()` for timeout or cancellation to take effect.

@@ -151,14 +151,8 @@ func TestRuntimeOpskitReadinessUsesRuntimeAggregate(t *testing.T) {
 	if readiness.Ready {
 		t.Fatal("Readiness.Ready = true before worker registration, want false")
 	}
-	if len(readiness.Components) != 1 {
-		t.Fatalf("Readiness.Components length = %d, want 1", len(readiness.Components))
-	}
-	if readiness.Components[0].Name != "runtime" {
-		t.Fatalf("Readiness component name = %q, want runtime", readiness.Components[0].Name)
-	}
-	if readiness.Components[0].State != opskit.StateStopped {
-		t.Fatalf("Readiness component state = %s, want %s", readiness.Components[0].State, opskit.StateStopped)
+	if len(readiness.Items) != 0 {
+		t.Fatalf("Readiness.Items = %#v before worker registration, want empty child detail", readiness.Items)
 	}
 
 	if err := rt.Register(WorkerSpec{Name: "worker", Worker: testWorker{}}); err != nil {
@@ -175,6 +169,51 @@ func TestRuntimeOpskitReadinessUsesRuntimeAggregate(t *testing.T) {
 	if !readiness.Ready {
 		t.Fatalf("Readiness.Ready = false after worker start, want true: %+v", readiness)
 	}
+	if len(readiness.Items) != 1 || readiness.Items[0].Name != "worker" || readiness.Items[0].Kind != "worker" {
+		t.Fatalf("Readiness.Items = %#v, want worker-scoped detail", readiness.Items)
+	}
+	if !readiness.Items[0].Ready || readiness.Items[0].State != opskit.StateReady || readiness.Items[0].Impact != opskit.ReadinessImpactBlocking {
+		t.Fatalf("worker readiness item = %#v, want blocking ready worker", readiness.Items[0])
+	}
+}
+
+func TestRuntimeOpskitReadinessTreatsStartingWorkerAsNotReady(t *testing.T) {
+	t.Parallel()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	rt := newOpskitRuntime(t)
+	if err := rt.Register(WorkerSpec{Name: "worker", Worker: testWorker{start: func(ctx context.Context) error {
+		workerRuntime, ok := WorkerRuntimeFromContext(ctx)
+		if !ok {
+			return errors.New("worker runtime unavailable")
+		}
+		if err := workerRuntime.SetReady(true); err != nil {
+			return err
+		}
+		close(entered)
+		<-release
+		return nil
+	}}}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	started := make(chan error, 1)
+	go func() { started <- rt.Start(context.Background(), "worker") }()
+	<-entered
+
+	readiness := rt.Readiness(context.Background())
+	if readiness.Ready || len(readiness.Items) != 1 || readiness.Items[0].Ready || readiness.Items[0].State != opskit.StateInitializing {
+		t.Fatalf("Readiness during Start = %#v, want authoritative not-ready initializing item", readiness)
+	}
+	close(release)
+	if err := <-started; err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	if readiness := rt.Readiness(context.Background()); !readiness.Ready || !readiness.Items[0].Ready || readiness.Items[0].State != opskit.StateReady {
+		t.Fatalf("Readiness after Start = %#v, want ready item", readiness)
+	}
+	t.Cleanup(func() { _ = rt.Stop(context.Background(), "worker") })
 }
 
 func TestRuntimeOpskitReadinessPreservesWorkerkitReadinessPolicy(t *testing.T) {
@@ -188,6 +227,51 @@ func TestRuntimeOpskitReadinessPreservesWorkerkitReadinessPolicy(t *testing.T) {
 	}
 	if readiness := allWorkersRuntime.Readiness(context.Background()); readiness.Ready {
 		t.Fatalf("all-workers readiness = true, want false: %+v", readiness)
+	}
+
+	contributing := contributingRuntime.Readiness(context.Background())
+	if len(contributing.Items) != 2 || contributing.Items[0].Impact != opskit.ReadinessImpactBlocking || contributing.Items[1].Impact != opskit.ReadinessImpactNonBlocking {
+		t.Fatalf("contributing-workers items = %#v, want blocking main and non-blocking optional", contributing.Items)
+	}
+	allWorkers := allWorkersRuntime.Readiness(context.Background())
+	if len(allWorkers.Items) != 2 || allWorkers.Items[0].Impact != opskit.ReadinessImpactBlocking || allWorkers.Items[1].Impact != opskit.ReadinessImpactBlocking {
+		t.Fatalf("all-workers items = %#v, want both blocking", allWorkers.Items)
+	}
+}
+
+func TestRuntimeOpskitReadinessImpactIncludesFailurePolicy(t *testing.T) {
+	t.Parallel()
+
+	rt := newOpskitRuntime(t)
+	if err := rt.Register(WorkerSpec{Name: "main", Worker: testWorker{}}); err != nil {
+		t.Fatalf("Register main returned error: %v", err)
+	}
+	for name, policy := range map[string]FailurePolicy{
+		"isolated": FailurePolicyIsolate,
+		"unready":  FailurePolicyMarkRuntimeUnready,
+		"fatal":    FailurePolicyFailRuntime,
+	} {
+		if err := rt.Register(
+			WorkerSpec{Name: name, Worker: testWorker{}},
+			WithWorkerReadinessContribution(false),
+			WithWorkerFailurePolicy(policy),
+		); err != nil {
+			t.Fatalf("Register %s returned error: %v", name, err)
+		}
+	}
+
+	readiness := rt.Readiness(context.Background())
+	items := make(map[string]opskit.ReadinessItem, len(readiness.Items))
+	for _, item := range readiness.Items {
+		items[item.Name] = item
+	}
+	if items["isolated"].Impact != opskit.ReadinessImpactNonBlocking {
+		t.Fatalf("isolated impact = %q, want non-blocking", items["isolated"].Impact)
+	}
+	for _, name := range []string{"unready", "fatal"} {
+		if items[name].Impact != opskit.ReadinessImpactBlocking {
+			t.Fatalf("%s impact = %q, want blocking", name, items[name].Impact)
+		}
 	}
 }
 

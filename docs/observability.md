@@ -37,12 +37,14 @@ call public `Runtime` lifecycle methods. Status reads and worker-scoped
 runtime name, worker name, command name, dispatch ID, and start time.
 
 `CommandEndEvent` describes one command dispatch completing. It includes
-duration, final success or failure, total handler attempts, message, error, and
-the same dispatch identity.
+duration, final success or failure, total handler attempts, safe public failure
+code/message, the private original cause, and the same dispatch identity.
 
 `FailureEvent` describes worker or command failure. Command handler failures
 emit attempt data per failed attempt, including attempts that are later retried
-successfully.
+successfully. `Code` and `Message` are safe operational presentation;
+`Cause` is private diagnostic data and must not be published without explicit
+application policy.
 
 `ReadinessEvent` describes readiness changes for a worker.
 
@@ -60,7 +62,8 @@ runtime, err := workerkit.New(identity,
 ```
 
 This is the lowest-setup production-friendly observer. It works without
-Servekit and without an OpenTelemetry collector.
+Servekit and without an OpenTelemetry collector. It deliberately logs only
+safe failure code/message fields and never formats an event's private `Cause`.
 
 ## OpenTelemetry
 
@@ -82,6 +85,9 @@ runtime, err := workerkit.New(identity,
 
 Dispatch IDs are high-cardinality values. They belong on spans and events, not
 metric labels.
+
+The OpenTelemetry adapter records only safe failure code/message fields. It
+does not record the private cause as an exception.
 
 ## Multiple Observers
 

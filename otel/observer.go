@@ -37,6 +37,7 @@ const (
 	attrLifecycleFrom   = "workerkit.lifecycle.from"
 	attrLifecycleTo     = "workerkit.lifecycle.to"
 	attrFailurePanic    = "workerkit.failure.panic"
+	attrFailureCode     = "workerkit.failure.code"
 	attrReady           = "workerkit.ready"
 )
 
@@ -210,6 +211,9 @@ func (o commandObservation) End(ctx context.Context, event workerkit.CommandEndE
 		append([]attribute.KeyValue{}, o.attrs...),
 		attribute.Bool(attrCommandSuccess, event.Success),
 	)
+	if event.Code != "" {
+		metricAttrs = append(metricAttrs, attribute.String(attrFailureCode, event.Code))
+	}
 	spanAttrs := append([]attribute.KeyValue{}, metricAttrs...)
 	dispatchID := o.dispatchID
 	if dispatchID == "" {
@@ -225,9 +229,7 @@ func (o commandObservation) End(ctx context.Context, event workerkit.CommandEndE
 	if event.Success {
 		o.span.SetStatus(codes.Ok, "")
 	} else {
-		if event.Err != nil {
-			o.span.RecordError(event.Err, trace.WithTimestamp(event.EndedAt))
-		} else if event.Message != "" {
+		if event.Message != "" {
 			o.span.RecordError(errors.New(event.Message), trace.WithTimestamp(event.EndedAt))
 		}
 		o.span.SetStatus(codes.Error, event.Message)
@@ -251,6 +253,9 @@ func (o *Observer) ObserveFailure(ctx context.Context, event workerkit.FailureEv
 		event.Command,
 		attribute.Bool(attrFailurePanic, event.Panic),
 	)
+	if event.Code != "" {
+		metricAttrs = append(metricAttrs, attribute.String(attrFailureCode, event.Code))
+	}
 	eventAttrs := append([]attribute.KeyValue{}, metricAttrs...)
 	if event.DispatchID != "" {
 		eventAttrs = append(eventAttrs, attribute.String(attrDispatchID, event.DispatchID))
@@ -260,9 +265,7 @@ func (o *Observer) ObserveFailure(ctx context.Context, event workerkit.FailureEv
 	}
 
 	span := trace.SpanFromContext(ctx)
-	if event.Err != nil {
-		span.RecordError(event.Err, trace.WithTimestamp(event.At))
-	} else if event.Message != "" {
+	if event.Message != "" {
 		span.RecordError(errors.New(event.Message), trace.WithTimestamp(event.At))
 	}
 	span.AddEvent(

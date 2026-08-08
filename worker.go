@@ -97,6 +97,9 @@ type WorkerRuntime interface {
 	// generation reports failure while Start is running, Start may still return
 	// nil while the worker finishes in StateFailed. A report accepted while Stop
 	// is running records LastFailure without interrupting the stopping transition.
+	// Arbitrary error text remains private and is not copied into status or
+	// built-in telemetry. Use WithOperationalFailure only for explicit bounded,
+	// redacted public detail.
 	// Reports after Stop completes or from a stale generation return
 	// ErrInvalidWorkerState without changing worker status.
 	ReportFailure(error) error

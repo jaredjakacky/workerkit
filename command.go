@@ -19,6 +19,104 @@ var (
 	ErrOpsCommandFailed = errors.New("opskit command failed")
 )
 
+const (
+	// FailureCodeOpskitCommandRejected is the default public code for a rejected
+	// Opskit command result without an explicit failure code.
+	FailureCodeOpskitCommandRejected = "opskit_command_rejected"
+	// FailureCodeOpskitCommandFailed is the default public code for a failed
+	// Opskit command result without an explicit failure code.
+	FailureCodeOpskitCommandFailed = "opskit_command_failed"
+	// FailureCodeOpskitResultEncodingFailed is the stable public code used when
+	// an Opskit command result cannot be encoded into a Workerkit payload.
+	FailureCodeOpskitResultEncodingFailed = "result_encoding_failed"
+)
+
+// OpskitCommandError reports an Opskit command result that Workerkit adapted
+// into its private command error channel. Failure is a value copy of explicit
+// public Opskit failure detail; Message is the command's public result message.
+// Use errors.Is with ErrOpsCommandRejected or ErrOpsCommandFailed to identify
+// the broad outcome and errors.As to inspect Failure.Code for application retry
+// or routing policy.
+type OpskitCommandError struct {
+	Failure opskit.Failure
+	Message string
+
+	kind  error
+	cause error
+}
+
+// Error implements error using only Opskit public operational text.
+func (e *OpskitCommandError) Error() string {
+	if e == nil {
+		return ""
+	}
+
+	detail := e.Failure.Message
+	if detail == "" {
+		detail = e.Message
+	}
+	if e.kind == nil {
+		if detail != "" {
+			return detail
+		}
+		return "opskit command failed"
+	}
+	if detail == "" {
+		return e.kind.Error()
+	}
+	return fmt.Sprintf("%s: %s", e.kind, detail)
+}
+
+// Unwrap exposes the existing broad Opskit command sentinel.
+func (e *OpskitCommandError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.kind
+}
+
+// Cause returns a private internal cause when Workerkit itself failed while
+// adapting the result. The cause is deliberately excluded from Error and from
+// public operational failure detail. Callers must not publish it without an
+// application-owned logging or presentation policy.
+func (e *OpskitCommandError) Cause() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+// OperationalFailure returns the explicit safe Opskit failure presentation.
+func (e *OpskitCommandError) OperationalFailure() opskit.Failure {
+	if e == nil {
+		return opskit.Failure{}
+	}
+	failure := e.Failure
+	if failure.Code == "" {
+		switch {
+		case errors.Is(e.kind, ErrOpsCommandRejected):
+			failure.Code = FailureCodeOpskitCommandRejected
+		default:
+			failure.Code = FailureCodeOpskitCommandFailed
+		}
+	}
+	if failure.Message == "" {
+		failure.Message = e.Message
+	}
+	if failure.Message == "" {
+		if e.kind != nil {
+			failure.Message = e.kind.Error()
+		} else {
+			failure.Message = "opskit command failed"
+		}
+	}
+	return failure
+}
+
+func (e *OpskitCommandError) operationalFailure() opskit.Failure {
+	return e.OperationalFailure()
+}
+
 // CommandRequest is one transport-agnostic worker-owned command invocation.
 //
 // Worker and Name identify the registered command target. Worker may be a
@@ -48,9 +146,11 @@ func (cmd CommandRequest) Validate() error {
 }
 
 // CommandResult is the transport-agnostic result of one worker-owned command
-// invocation.
+// invocation. Message and Payload may flow to HTTP responses, admin tools,
+// logs, diagnostics, support tools, and tests. Handlers must return only result
+// data that is safe for their configured presentation surfaces.
 type CommandResult struct {
-	// Message is optional human-readable result text.
+	// Message is optional public human-readable result text.
 	Message string
 	// Payload is opaque command output.
 	Payload []byte
@@ -60,7 +160,9 @@ type CommandResult struct {
 //
 // Handlers must honor context cancellation. Command timeouts are delivered
 // through ctx.Done(). Workerkit cannot interrupt handlers that block without
-// observing the context.
+// observing the context. Arbitrary returned error text remains private and is
+// not copied into status or built-in telemetry. Use WithOperationalFailure only
+// for explicit bounded, redacted public detail.
 type CommandHandler interface {
 	HandleCommand(context.Context, CommandRequest) (CommandResult, error)
 }
@@ -173,7 +275,7 @@ func (h opskitCommandHandler) HandleCommand(ctx context.Context, req CommandRequ
 	if !result.Accepted {
 		return CommandResult{}, newOpskitCommandError(ErrOpsCommandRejected, result)
 	}
-	if result.Error != "" {
+	if result.Failure != nil && *result.Failure != (opskit.Failure{}) {
 		return CommandResult{}, newOpskitCommandError(ErrOpsCommandFailed, result)
 	}
 
@@ -181,22 +283,37 @@ func (h opskitCommandHandler) HandleCommand(ctx context.Context, req CommandRequ
 	if result.Result != nil {
 		encoded, err := json.Marshal(result.Result)
 		if err != nil {
-			return CommandResult{}, fmt.Errorf("%w: marshal result: %v", ErrOpsCommandFailed, err)
+			return CommandResult{}, newOpskitCommandAdaptationError(
+				ErrOpsCommandFailed,
+				opskit.Failure{
+					Code:    FailureCodeOpskitResultEncodingFailed,
+					Message: "opskit command result encoding failed",
+				},
+				err,
+			)
 		}
 		payload = encoded
 	}
 	return CommandResult{Message: result.Message, Payload: payload}, nil
 }
 
+func newOpskitCommandAdaptationError(kind error, failure opskit.Failure, cause error) error {
+	return &OpskitCommandError{
+		Failure: failure,
+		kind:    kind,
+		cause:   cause,
+	}
+}
+
 func newOpskitCommandError(kind error, result opskit.CommandResult) error {
-	detail := result.Error
-	if detail == "" {
-		detail = result.Message
+	adapted := &OpskitCommandError{
+		kind:    kind,
+		Message: result.Message,
 	}
-	if detail == "" {
-		return kind
+	if result.Failure != nil {
+		adapted.Failure = *result.Failure
 	}
-	return fmt.Errorf("%w: %s", kind, detail)
+	return adapted
 }
 
 func cloneCommandAttributes(attributes []opskit.Attribute) []opskit.Attribute {

@@ -112,8 +112,9 @@ func printStatus(runtime *workerkit.Runtime) {
 			worker.Status.Ready,
 			worker.Status.AcceptingWork)
 		if worker.Status.LastFailure != nil {
-			fmt.Printf("last failure worker=%s message=%q\n",
+			fmt.Printf("last failure worker=%s code=%q message=%q\n",
 				worker.QualifiedName,
+				worker.Status.LastFailure.Code,
 				worker.Status.LastFailure.Message)
 		}
 	}

@@ -231,14 +231,17 @@ func TestCommandFromOpskitMapsOutcomes(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		result  opskit.CommandResult
-		wantErr error
+		name           string
+		result         opskit.CommandResult
+		wantErr        error
+		wantCode       string
+		wantPublicCode string
 	}{
-		{name: "rejected", result: opskit.RejectedCommand("disabled"), wantErr: ErrOpsCommandRejected},
-		{name: "rejected with error detail", result: opskit.CommandResult{State: opskit.StateNotReady, Accepted: false, Error: "disabled"}, wantErr: ErrOpsCommandRejected},
-		{name: "failed", result: opskit.FailedCommand("refresh failed", errors.New("backend unavailable"), 0), wantErr: ErrOpsCommandFailed},
-		{name: "error text implies failure", result: opskit.CommandResult{State: opskit.StateReady, Accepted: true, Error: "inconsistent failure"}, wantErr: ErrOpsCommandFailed},
+		{name: "rejected", result: opskit.RejectedCommand("disabled"), wantErr: ErrOpsCommandRejected, wantPublicCode: FailureCodeOpskitCommandRejected},
+		{name: "rejected with failure detail", result: opskit.CommandResult{State: opskit.StateNotReady, Accepted: false, Failure: &opskit.Failure{Code: "disabled", Message: "disabled"}}, wantErr: ErrOpsCommandRejected, wantCode: "disabled", wantPublicCode: "disabled"},
+		{name: "failed without detail", result: opskit.FailedCommand("refresh failed", 0), wantErr: ErrOpsCommandFailed, wantPublicCode: FailureCodeOpskitCommandFailed},
+		{name: "failed", result: opskit.FailedCommandWithFailure("refresh failed", opskit.Failure{Code: "unavailable", Message: "backend unavailable"}, 0), wantErr: ErrOpsCommandFailed, wantCode: "unavailable", wantPublicCode: "unavailable"},
+		{name: "failure detail implies failure", result: opskit.CommandResult{State: opskit.StateReady, Accepted: true, Failure: &opskit.Failure{Code: "inconsistent", Message: "inconsistent failure"}}, wantErr: ErrOpsCommandFailed, wantCode: "inconsistent", wantPublicCode: "inconsistent"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -249,7 +252,35 @@ func TestCommandFromOpskitMapsOutcomes(t *testing.T) {
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("error = %v, want %v", err, tt.wantErr)
 			}
+			var opsErr *OpskitCommandError
+			if !errors.As(err, &opsErr) {
+				t.Fatalf("error = %T, want *OpskitCommandError", err)
+			}
+			if opsErr.Failure.Code != tt.wantCode {
+				t.Fatalf("failure code = %q, want %q", opsErr.Failure.Code, tt.wantCode)
+			}
+			if got := opsErr.OperationalFailure().Code; got != tt.wantPublicCode {
+				t.Fatalf("operational failure code = %q, want %q", got, tt.wantPublicCode)
+			}
+			if tt.result.Failure != nil {
+				tt.result.Failure.Code = "mutated"
+				if opsErr.Failure.Code != tt.wantCode {
+					t.Fatalf("failure code after source mutation = %q, want detached %q", opsErr.Failure.Code, tt.wantCode)
+				}
+			}
 		})
+	}
+}
+
+func TestOpskitCommandErrorZeroValueIsSafe(t *testing.T) {
+	t.Parallel()
+
+	err := &OpskitCommandError{}
+	if err.Error() != "opskit command failed" {
+		t.Fatalf("Error() = %q, want safe non-empty fallback", err.Error())
+	}
+	if failure := err.OperationalFailure(); failure.Code != FailureCodeOpskitCommandFailed || failure.Message != "opskit command failed" {
+		t.Fatalf("OperationalFailure() = %#v, want default Opskit failure", failure)
 	}
 }
 
@@ -272,13 +303,26 @@ func TestCommandFromOpskitMapsCancellationAndResultEncoding(t *testing.T) {
 		t.Fatalf("deadline error = %v, want context.DeadlineExceeded", err)
 	}
 
+	const secret = "postgres://user:pass@internal/config"
+	cause := errors.New("marshal failed for " + secret)
 	spec = CommandFromOpskit(opskit.CommandDescriptor{Name: "refresh"}, opskit.CommandHandlerFunc(
 		func(context.Context, opskit.CommandRequest) opskit.CommandResult {
-			return opskit.CompletedCommand("invalid", make(chan int), 0)
+			return opskit.CompletedCommand("invalid", commandTestFailingJSON{err: cause}, 0)
 		},
 	))
-	if _, err := spec.Handler.HandleCommand(context.Background(), CommandRequest{Name: "refresh"}); !errors.Is(err, ErrOpsCommandFailed) || !strings.Contains(err.Error(), "marshal result") {
-		t.Fatalf("encoding error = %v, want ErrOpsCommandFailed marshal error", err)
+	if _, err := spec.Handler.HandleCommand(context.Background(), CommandRequest{Name: "refresh"}); err == nil {
+		t.Fatal("encoding error = nil, want error")
+	} else {
+		if !errors.Is(err, ErrOpsCommandFailed) || strings.Contains(err.Error(), secret) {
+			t.Fatalf("encoding error = %v, want safe ErrOpsCommandFailed", err)
+		}
+		var opsErr *OpskitCommandError
+		if !errors.As(err, &opsErr) || opsErr.Failure.Code != FailureCodeOpskitResultEncodingFailed {
+			t.Fatalf("encoding error = %#v, want typed result_encoding_failed", err)
+		}
+		if !errors.Is(opsErr.Cause(), cause) {
+			t.Fatalf("encoding cause = %v, want private original cause", opsErr.Cause())
+		}
 	}
 
 	var nilHandler opskit.CommandHandler
@@ -287,12 +331,21 @@ func TestCommandFromOpskitMapsCancellationAndResultEncoding(t *testing.T) {
 	}
 }
 
+type commandTestFailingJSON struct {
+	err error
+}
+
+func (v commandTestFailingJSON) MarshalJSON() ([]byte, error) {
+	return nil, v.err
+}
+
 func TestCommandFromOpskitAcceptedAsyncAndNilResult(t *testing.T) {
 	t.Parallel()
 
 	for name, opsResult := range map[string]opskit.CommandResult{
-		"accepted":  opskit.AcceptedCommand("queued"),
-		"completed": opskit.CompletedCommand("done", nil, 0),
+		"accepted":     opskit.AcceptedCommand("queued"),
+		"completed":    opskit.CompletedCommand("done", nil, 0),
+		"zero_failure": {State: opskit.StateReady, Accepted: true, Message: "done", Failure: &opskit.Failure{}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			spec := CommandFromOpskit(opskit.CommandDescriptor{Name: "refresh"}, opskit.CommandHandlerFunc(

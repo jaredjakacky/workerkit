@@ -107,9 +107,10 @@ func (o commandObservation) End(ctx context.Context, event workerkit.CommandEndE
 	if event.Attempts > 0 {
 		attrs = append(attrs, slog.Int("attempts", event.Attempts))
 	}
-	if event.Err != nil {
-		attrs = append(attrs, slog.Any("error", event.Err))
-	} else if event.Message != "" {
+	if event.Code != "" {
+		attrs = append(attrs, slog.String("failure_code", event.Code))
+	}
+	if event.Message != "" {
 		attrs = append(attrs, slog.String("error", event.Message))
 	}
 
@@ -130,9 +131,10 @@ func (o *Observer) ObserveFailure(ctx context.Context, event workerkit.FailureEv
 	if event.Attempt > 0 {
 		attrs = append(attrs, slog.Int("attempt", event.Attempt))
 	}
-	if event.Err != nil {
-		attrs = append(attrs, slog.Any("error", event.Err))
-	} else if event.Message != "" {
+	if event.Code != "" {
+		attrs = append(attrs, slog.String("failure_code", event.Code))
+	}
+	if event.Message != "" {
 		attrs = append(attrs, slog.String("error", event.Message))
 	}
 

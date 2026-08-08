@@ -144,7 +144,10 @@ func WithCheckSummaryObserver(observer CheckSummaryObserver) CheckLoopOption {
 // component remains responsible for any cached dependency health state.
 func NewCheckLoop(checker opskit.Checker, opts ...CheckLoopOption) Worker {
 	cfg := newCheckLoopConfig(opts)
-	cfg.panicErr = fmt.Errorf("opskit checker panicked: %w", ErrCheckLoopPanicked)
+	cfg.panicErr = WithOperationalFailure(ErrCheckLoopPanicked, opskit.Failure{
+		Code:    FailureCodePanic,
+		Message: "opskit checker panicked: opskit check loop panicked",
+	})
 	return NewLoopWorker(
 		func(ctx context.Context, runtime WorkerRuntime) error {
 			return runCheckLoop(ctx, runtime, cfg, func(ctx context.Context) checkLoopOutcome {
@@ -175,7 +178,10 @@ func NewCheckLoop(checker opskit.Checker, opts ...CheckLoopOption) Worker {
 // component remains responsible for any cached dependency health state.
 func NewCheckGroupLoop(group opskit.CheckGroup, opts ...CheckLoopOption) Worker {
 	cfg := newCheckLoopConfig(opts)
-	cfg.panicErr = fmt.Errorf("opskit check group panicked: %w", ErrCheckLoopPanicked)
+	cfg.panicErr = WithOperationalFailure(ErrCheckLoopPanicked, opskit.Failure{
+		Code:    FailureCodePanic,
+		Message: "opskit check group panicked: opskit check loop panicked",
+	})
 	return NewLoopWorker(
 		func(ctx context.Context, runtime WorkerRuntime) error {
 			return runCheckLoop(ctx, runtime, cfg, func(ctx context.Context) checkLoopOutcome {

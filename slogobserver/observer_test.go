@@ -3,13 +3,15 @@ package slogobserver_test
 import (
 	"context"
 	"errors"
-	. "github.com/jaredjakacky/workerkit/slogobserver"
+	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	workerkit "github.com/jaredjakacky/workerkit"
+	. "github.com/jaredjakacky/workerkit/slogobserver"
 )
 
 type captureHandler struct {
@@ -153,7 +155,8 @@ func TestCommandEndLogsError(t *testing.T) {
 
 	handler := &captureHandler{}
 	observer := New(slog.New(handler))
-	wantErr := errors.New("command failed")
+	const secret = "postgres://user:pass@internal/commands"
+	wantErr := errors.New(secret)
 
 	_, observation := observer.StartCommand(context.Background(), workerkit.CommandStartEvent{
 		Runtime: "runtime",
@@ -162,13 +165,16 @@ func TestCommandEndLogsError(t *testing.T) {
 	})
 	observation.End(context.Background(), workerkit.CommandEndEvent{
 		Success: false,
-		Err:     wantErr,
-		Message: "fallback message",
+		Cause:   wantErr,
+		Code:    "command_failed",
+		Message: "command failed",
 	})
 
 	record := handler.lastRecord(t)
 	requireRecord(t, record, slog.LevelInfo, "workerkit command dispatch completed")
-	requireErrorAttr(t, record, "error", wantErr)
+	requireStringAttr(t, record, "failure_code", "command_failed")
+	requireStringAttr(t, record, "error", "command failed")
+	requireRecordExcludes(t, record, secret)
 }
 
 func TestObserveFailureLogsAtErrorLevel(t *testing.T) {
@@ -176,7 +182,8 @@ func TestObserveFailureLogsAtErrorLevel(t *testing.T) {
 
 	handler := &captureHandler{}
 	observer := New(slog.New(handler), WithLevel(slog.LevelDebug))
-	wantErr := errors.New("worker failed")
+	const secret = "token=super-secret"
+	wantErr := errors.New(secret)
 
 	observer.ObserveFailure(context.Background(), workerkit.FailureEvent{
 		Runtime:    "runtime",
@@ -184,7 +191,9 @@ func TestObserveFailureLogsAtErrorLevel(t *testing.T) {
 		Command:    "sync",
 		DispatchID: "runtime-1",
 		Attempt:    2,
-		Err:        wantErr,
+		Cause:      wantErr,
+		Code:       "worker_failed",
+		Message:    "worker operation failed",
 		Panic:      true,
 	})
 
@@ -196,7 +205,9 @@ func TestObserveFailureLogsAtErrorLevel(t *testing.T) {
 	requireStringAttr(t, record, "dispatch_id", "runtime-1")
 	requireIntAttr(t, record, "attempt", 2)
 	requireBoolAttr(t, record, "panic", true)
-	requireErrorAttr(t, record, "error", wantErr)
+	requireStringAttr(t, record, "failure_code", "worker_failed")
+	requireStringAttr(t, record, "error", "worker operation failed")
+	requireRecordExcludes(t, record, secret)
 }
 
 func TestObserveReadinessLogsReadyWithoutWorkerAttr(t *testing.T) {
@@ -306,18 +317,9 @@ func requireDurationAttr(t *testing.T, record capturedRecord, key string, want t
 	}
 }
 
-func requireErrorAttr(t *testing.T, record capturedRecord, key string, want error) {
+func requireRecordExcludes(t *testing.T, record capturedRecord, unwanted string) {
 	t.Helper()
-
-	value, ok := record.attrs[key]
-	if !ok {
-		t.Fatalf("%s attr omitted, want %v", key, want)
-	}
-	got, ok := value.Any().(error)
-	if !ok {
-		t.Fatalf("%s attr = %T, want error", key, value.Any())
-	}
-	if !errors.Is(got, want) {
-		t.Fatalf("%s attr = %v, want %v", key, got, want)
+	if strings.Contains(fmt.Sprint(record.attrs), unwanted) {
+		t.Fatalf("record attrs = %#v, unexpectedly contain %q", record.attrs, unwanted)
 	}
 }

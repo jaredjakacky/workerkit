@@ -151,8 +151,8 @@ func TestWorkerStatusReturnsClonedTransitionAndCommandFailure(t *testing.T) {
 	if fresh.Status.LastTransition == nil || fresh.Status.LastTransition.To != StateRunning {
 		t.Fatalf("fresh LastTransition = %#v, want running transition", fresh.Status.LastTransition)
 	}
-	if fresh.Status.LastCommandFailure == nil || fresh.Status.LastCommandFailure.Message != commandErr.Error() {
-		t.Fatalf("fresh LastCommandFailure = %#v, want %q", fresh.Status.LastCommandFailure, commandErr.Error())
+	if fresh.Status.LastCommandFailure == nil || fresh.Status.LastCommandFailure.Message != "command failed" {
+		t.Fatalf("fresh LastCommandFailure = %#v, want generic public failure", fresh.Status.LastCommandFailure)
 	}
 }
 

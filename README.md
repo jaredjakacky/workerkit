@@ -38,6 +38,7 @@ With one runtime, Workerkit gives you:
 - bounded retry with backoff and jitter
 - runtime-wide and worker-local concurrency limits
 - panic and failure policy
+- safe-by-default operational failure presentation
 - structured observer hooks
 - optional `slog` and OpenTelemetry adapters
 - Opskit component, readiness, and inspection support
@@ -241,7 +242,11 @@ Workerkit has a short normal path, but it is not limited to startup and shutdown
 - opt-in HTTP command dispatch and privileged lifecycle controls
 - optional Workerkit lifecycle coordination around an application-owned Servekit server
 
-The advanced path is documented in [docs/advanced.md](docs/advanced.md), with policy details in [docs/policy.md](docs/policy.md) and Servekit composition in [docs/composition.md](docs/composition.md).
+The advanced path is documented in [docs/advanced.md](docs/advanced.md), with
+failure publication rules in
+[docs/operational-safety.md](docs/operational-safety.md), policy details in
+[docs/policy.md](docs/policy.md), and Servekit composition in
+[docs/composition.md](docs/composition.md).
 
 ## Kit Series Operations Path
 
