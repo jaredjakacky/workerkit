@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 
+	opskit "github.com/jaredjakacky/opskit"
 	"github.com/jaredjakacky/servekit"
+	workerkit "github.com/jaredjakacky/workerkit"
 )
 
 func decodeStrictJSON(r *http.Request, dst any, label string) error {
@@ -37,4 +39,12 @@ func badRequestError(message string) error {
 
 func notFoundError(kind, name string) error {
 	return servekit.Error(http.StatusNotFound, fmt.Sprintf("%s %q not found", kind, name), nil)
+}
+
+// mappedOperationalError preserves cause discovery while ensuring that both
+// the public HTTP message and the mapped error's own Error method use only
+// explicitly selected operational text.
+func mappedOperationalError(status int, message string, cause error) error {
+	safeCause := workerkit.WithOperationalFailure(cause, opskit.Failure{Message: message})
+	return servekit.Error(status, message, safeCause)
 }

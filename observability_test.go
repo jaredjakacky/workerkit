@@ -282,7 +282,7 @@ func TestMultiObserverFansOutEventsAndRecoversPanics(t *testing.T) {
 
 	transition := TransitionEvent{Runtime: "runtime", Worker: "runtime/worker", From: StateRegistered, To: StateRunning}
 	failureErr := errors.New("failed")
-	failure := FailureEvent{Runtime: "runtime", Worker: "runtime/worker", Err: failureErr, Message: failureErr.Error()}
+	failure := FailureEvent{Runtime: "runtime", Worker: "runtime/worker", Cause: failureErr, Message: "worker operation failed"}
 	readiness := ReadinessEvent{Runtime: "runtime", Worker: "runtime/worker", Ready: true}
 
 	observer.ObserveTransition(context.Background(), transition)

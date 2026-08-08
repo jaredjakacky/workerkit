@@ -286,8 +286,8 @@ func TestWorkerStatusReturnsClonedFailureInfo(t *testing.T) {
 	if !ok {
 		t.Fatal("Worker missing worker")
 	}
-	if fresh.Status.LastFailure == nil || fresh.Status.LastFailure.Message != failure.Error() {
-		t.Fatalf("fresh LastFailure = %#v, want %q", fresh.Status.LastFailure, failure.Error())
+	if fresh.Status.LastFailure == nil || fresh.Status.LastFailure.Message != "worker operation failed" {
+		t.Fatalf("fresh LastFailure = %#v, want generic public failure", fresh.Status.LastFailure)
 	}
 }
 

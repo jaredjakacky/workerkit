@@ -455,8 +455,8 @@ func TestLoopWorkerUnexpectedNilExitReportsFailureAndRunsStopHook(t *testing.T) 
 	close(release)
 
 	snapshot := waitForLoopState(t, rt, StateFailed)
-	if snapshot.Status.LastFailure == nil || snapshot.Status.LastFailure.Message != ErrLoopExitedUnexpectedly.Error() {
-		t.Fatalf("LastFailure = %#v, want %q", snapshot.Status.LastFailure, ErrLoopExitedUnexpectedly.Error())
+	if snapshot.Status.LastFailure == nil || snapshot.Status.LastFailure.Message != "worker operation failed" {
+		t.Fatalf("LastFailure = %#v, want generic public failure", snapshot.Status.LastFailure)
 	}
 	select {
 	case <-cleanupDone:
@@ -553,8 +553,8 @@ func TestLoopWorkerReportsGenuineErrorRacingWithStop(t *testing.T) {
 	if snapshot.Status.State != StateStopped {
 		t.Fatalf("worker state = %s, want %s", snapshot.Status.State, StateStopped)
 	}
-	if snapshot.Status.LastFailure == nil || snapshot.Status.LastFailure.Message != loopErr.Error() {
-		t.Fatalf("LastFailure = %#v, want %q", snapshot.Status.LastFailure, loopErr.Error())
+	if snapshot.Status.LastFailure == nil || snapshot.Status.LastFailure.Message != "worker operation failed" {
+		t.Fatalf("LastFailure = %#v, want generic public failure", snapshot.Status.LastFailure)
 	}
 }
 
@@ -580,8 +580,8 @@ func TestLoopWorkerPublishesFailureBeforeStopCompletes(t *testing.T) {
 	close(releaseLoop)
 
 	event := <-observer.entered
-	if !errors.Is(event.Err, loopErr) {
-		t.Fatalf("failure event error = %v, want %v", event.Err, loopErr)
+	if !errors.Is(event.Cause, loopErr) {
+		t.Fatalf("failure event cause = %v, want %v", event.Cause, loopErr)
 	}
 	stopDone := make(chan error, 1)
 	go func() {
@@ -600,8 +600,8 @@ func TestLoopWorkerPublishesFailureBeforeStopCompletes(t *testing.T) {
 	}
 
 	snapshot := requireWorker(t, rt, "loop")
-	if snapshot.Status.LastFailure == nil || snapshot.Status.LastFailure.Message != loopErr.Error() {
-		t.Fatalf("LastFailure = %#v, want %q", snapshot.Status.LastFailure, loopErr.Error())
+	if snapshot.Status.LastFailure == nil || snapshot.Status.LastFailure.Message != "worker operation failed" {
+		t.Fatalf("LastFailure = %#v, want generic public failure", snapshot.Status.LastFailure)
 	}
 }
 
@@ -622,8 +622,8 @@ func TestLoopWorkerUnexpectedErrorExitReportsFailure(t *testing.T) {
 	close(release)
 
 	snapshot := waitForLoopState(t, rt, StateFailed)
-	if snapshot.Status.LastFailure == nil || snapshot.Status.LastFailure.Message != loopErr.Error() {
-		t.Fatalf("LastFailure = %#v, want %q", snapshot.Status.LastFailure, loopErr.Error())
+	if snapshot.Status.LastFailure == nil || snapshot.Status.LastFailure.Message != "worker operation failed" {
+		t.Fatalf("LastFailure = %#v, want generic public failure", snapshot.Status.LastFailure)
 	}
 }
 

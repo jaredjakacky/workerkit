@@ -148,7 +148,41 @@ Everything else in this file exists to customize that path without turning worke
 
 - `ErrOpsCommandFailed`
 
-  Identifies an Opskit failed result, explicit result error text, or result encoding failure.
+  Identifies an Opskit failed result, explicit public failure detail, or result encoding failure.
+
+- `OpskitCommandError`
+
+  The typed error returned when an Opskit result is rejected or failed. It
+  unwraps to the corresponding broad sentinel and preserves a value copy of
+  `opskit.Failure`, allowing application policy to inspect its stable code with
+  `errors.As`. Its error text uses only Opskit public operational messages.
+  `Cause()` returns a private adaptation cause, when present, and must not be
+  copied to an operational surface without application-owned policy.
+
+- `FailureCodeOpskitCommandRejected`
+- `FailureCodeOpskitCommandFailed`
+- `FailureCodeOpskitResultEncodingFailed`
+
+  Stable default public codes for Opskit rejection, failure, and result
+  encoding failure. Explicit Opskit failure codes take precedence. An arbitrary
+  encoder error remains available only through `OpskitCommandError.Cause()`.
+
+- `WithOperationalFailure(...)`
+
+  Associates an explicit safe public `opskit.Failure` with a private cause.
+  The wrapper formats only the public message and unwraps to the cause so
+  `errors.Is` and `errors.As` continue to work. Both public fields may flow to
+  status, logs, telemetry, diagnostics, support tools, and tests.
+
+- `FailureCodeWorkerFailed`
+- `FailureCodeCommandFailed`
+- `FailureCodeDeadlineExceeded`
+- `FailureCodeCanceled`
+- `FailureCodePanic`
+
+  Stable public codes used by Workerkit's default failure projection. Ordinary
+  arbitrary errors receive a generic worker or command presentation; they are
+  never formatted into public status or built-in telemetry.
 
 - `CommandHandler`
 
@@ -226,11 +260,15 @@ Everything else in this file exists to customize that path without turning worke
 
 - `FailureInfo`
 
-  The most recent worker lifecycle or background failure recorded in worker status.
+  The most recent worker lifecycle or background failure recorded in worker
+  status. `Code` and `Message` are safe public operational data; no private
+  cause is retained.
 
 - `CommandFailureInfo`
 
   The most recent command handler returned error recorded in worker status.
+  `Code` and `Message` are safe public operational data; no private cause is
+  retained.
 
 - `CommandInfo`
 
@@ -447,11 +485,16 @@ Default worker options are copied into each worker when it is registered. Later 
 
 - `CommandEndEvent`
 
-  End of one command dispatch. Includes final success/failure, duration, dispatch id, and attempt count.
+  End of one command dispatch. Includes final success/failure, duration,
+  dispatch id, attempt count, safe public failure code/message, and the private
+  original `Cause`. Custom observers must not publish `Cause` without explicit
+  application policy.
 
 - `FailureEvent`
 
-  One worker lifecycle, background, command, or panic failure. Command retry failures include dispatch id and attempt number.
+  One worker lifecycle, background, command, or panic failure. Command retry
+  failures include dispatch id and attempt number. `Code` and `Message` are
+  public operational data; `Cause` is private diagnostic data.
 
 - `ReadinessEvent`
 
@@ -903,7 +946,11 @@ registry and Servekit presentation explicitly.
 
   Appends attributes to emitted spans and metrics. Service identity should usually be configured on the OpenTelemetry resource instead.
 
-The adapter records command dispatches as spans, lifecycle/readiness/failure events on the current span, and counters/histograms for runtime activity. Dispatch ids appear on spans and span events, not metrics, to avoid high-cardinality metric labels.
+The adapter records command dispatches as spans, lifecycle/readiness/failure
+events on the current span, and counters/histograms for runtime activity. It
+records safe failure code/message fields and deliberately ignores private event
+causes. Dispatch ids appear on spans and span events, not metrics, to avoid
+high-cardinality metric labels.
 
 ## Package `slogobserver`
 
@@ -929,16 +976,37 @@ The adapter records command dispatches as spans, lifecycle/readiness/failure eve
 
   Appends attributes to every log record.
 
+The adapter logs safe failure code/message fields and deliberately ignores
+private event causes.
+
+## Pre-v1 migration notes
+
+The Opskit v0.3 integration is a clean pre-v1 contract update:
+
+- `Runtime.Readiness` now returns worker-scoped `Readiness.Items`; the Opskit
+  registry owns the parent runtime identity and required/optional registration
+  policy.
+- Worker item `Impact` expresses Workerkit child readiness behavior and is
+  separate from Opskit registry `ReadinessPolicy`.
+- `CommandEndEvent.Err` and `FailureEvent.Err` are replaced by explicitly
+  private `Cause` fields plus safe public `Code` and `Message` fields.
+- arbitrary lifecycle, background, and command errors now receive generic
+  public status/telemetry presentation by default; use
+  `WithOperationalFailure` for explicit safe detail.
+- Opskit command failures are exposed as `*OpskitCommandError`; use
+  `errors.Is` for broad outcome and `errors.As` for explicit failure codes.
+
 ## Suggested reading order
 
 If you are new to the codebase:
 
 1. [README](../README.md)
 2. API Map
-3. [Examples Directory](../examples/README.md)
-4. [`examples/opskit-checks`](../examples/opskit-checks)
-5. [`examples/opskit-command`](../examples/opskit-command)
-6. [`examples/production-composition`](../examples/production-composition)
+3. [Operational Safety](operational-safety.md)
+4. [Examples Directory](../examples/README.md)
+5. [`examples/opskit-checks`](../examples/opskit-checks)
+6. [`examples/opskit-command`](../examples/opskit-command)
+7. [`examples/production-composition`](../examples/production-composition)
 
 Read the `opshttp` examples separately when Workerkit-specific HTTP controls
 are relevant to the deployment.

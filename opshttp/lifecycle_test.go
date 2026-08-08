@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	. "github.com/jaredjakacky/workerkit/opshttp"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,6 +12,7 @@ import (
 
 	"github.com/jaredjakacky/servekit"
 	workerkit "github.com/jaredjakacky/workerkit"
+	. "github.com/jaredjakacky/workerkit/opshttp"
 )
 
 func TestWorkerLifecycleRoutesStartDrainAndStopWorker(t *testing.T) {
@@ -176,6 +177,25 @@ func TestWorkerLifecycleRouteValidationAndErrorMapping(t *testing.T) {
 	rec = postLifecycle(t, server, "/admin/workers/start", `{"name":"worker"}`)
 	assertStatus(t, rec, http.StatusConflict)
 	assertErrorBody(t, rec, workerkit.ErrInvalidWorkerState.Error())
+}
+
+func TestWorkerLifecycleRouteDoesNotExposeWrappedSentinelDetail(t *testing.T) {
+	t.Parallel()
+
+	const secret = "postgres://user:pass@internal/lifecycle"
+	rt := newLifecycleRuntime(t, "ops", map[string]workerkit.Worker{
+		"worker": lifecycleWorkerFunc(func(context.Context) error {
+			return fmt.Errorf("%w: %s", workerkit.ErrInvalidWorkerState, secret)
+		}),
+	})
+	server := newLifecycleServer(t, rt)
+
+	rec := postLifecycle(t, server, "/admin/workers/start", `{"name":"worker"}`)
+	assertStatus(t, rec, http.StatusConflict)
+	assertErrorBody(t, rec, workerkit.ErrInvalidWorkerState.Error())
+	if bytes.Contains(rec.Body.Bytes(), []byte(secret)) {
+		t.Fatalf("lifecycle response exposed private error detail: %s", rec.Body.String())
+	}
 }
 
 func TestLifecycleRouteAppliesOperationTimeout(t *testing.T) {

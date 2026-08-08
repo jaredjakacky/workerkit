@@ -103,13 +103,21 @@ func mapDispatchError(runtime *workerkit.Runtime, workerName, commandName string
 	case errors.Is(err, workerkit.ErrCommandNotFound):
 		return notFoundError("command", commandName)
 	case errors.Is(err, workerkit.ErrRuntimeNotAcceptingWork):
-		return servekit.Error(http.StatusServiceUnavailable, err.Error(), err)
+		return mappedOperationalError(http.StatusServiceUnavailable, workerkit.ErrRuntimeNotAcceptingWork.Error(), err)
 	case errors.Is(err, workerkit.ErrWorkerNotAcceptingWork), errors.Is(err, workerkit.ErrInvalidWorkerState):
-		return servekit.Error(http.StatusConflict, err.Error(), err)
+		message := workerkit.ErrWorkerNotAcceptingWork.Error()
+		if errors.Is(err, workerkit.ErrInvalidWorkerState) {
+			message = workerkit.ErrInvalidWorkerState.Error()
+		}
+		return mappedOperationalError(http.StatusConflict, message, err)
 	case errors.Is(err, workerkit.ErrRuntimeSaturated), errors.Is(err, workerkit.ErrWorkerSaturated):
-		return servekit.Error(http.StatusTooManyRequests, err.Error(), err)
+		message := workerkit.ErrRuntimeSaturated.Error()
+		if errors.Is(err, workerkit.ErrWorkerSaturated) {
+			message = workerkit.ErrWorkerSaturated.Error()
+		}
+		return mappedOperationalError(http.StatusTooManyRequests, message, err)
 	case errors.Is(err, workerkit.ErrOpsCommandRejected):
-		return servekit.Error(http.StatusConflict, err.Error(), err)
+		return mappedOperationalError(http.StatusConflict, opskitRejectedMessage(err), err)
 	case containsWorker(workerName, runtime):
 		// If the runtime did not expose a sentinel error, preserve lookup
 		// semantics before returning the original error.
@@ -120,6 +128,14 @@ func mapDispatchError(runtime *workerkit.Runtime, workerName, commandName string
 	default:
 		return notFoundError("worker", workerName)
 	}
+}
+
+func opskitRejectedMessage(err error) string {
+	var opsErr *workerkit.OpskitCommandError
+	if errors.As(err, &opsErr) && errors.Is(opsErr, workerkit.ErrOpsCommandRejected) {
+		return opsErr.Error()
+	}
+	return workerkit.ErrOpsCommandRejected.Error()
 }
 
 func containsWorker(name string, runtime *workerkit.Runtime) bool {

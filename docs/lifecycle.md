@@ -175,6 +175,22 @@ Background workers can report asynchronous failures through `WorkerRuntime`:
 workerRuntime.ReportFailure(err)
 ```
 
+The returned error remains available to direct callers and explicit observers
+as a private cause, but Workerkit does not copy arbitrary error text into status,
+logs, or telemetry. Status receives a generic safe failure by default. When the
+worker owns an explicitly safe explanation, wrap the cause before returning or
+reporting it:
+
+```go
+workerRuntime.ReportFailure(workerkit.WithOperationalFailure(err, opskit.Failure{
+	Code:    "subscription_failed",
+	Message: "subscription unavailable",
+}))
+```
+
+See [`operational-safety.md`](operational-safety.md) for the publication
+boundary.
+
 `Worker.Start` should return setup failures directly. `ReportFailure` is an
 asynchronous health signal: if the current worker generation reports failure
 while `Worker.Start` is still running, the lifecycle remains `starting` until

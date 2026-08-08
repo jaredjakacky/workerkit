@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	. "github.com/jaredjakacky/workerkit/opshttp"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,6 +13,7 @@ import (
 	opskit "github.com/jaredjakacky/opskit"
 	"github.com/jaredjakacky/servekit"
 	workerkit "github.com/jaredjakacky/workerkit"
+	. "github.com/jaredjakacky/workerkit/opshttp"
 )
 
 type testWorker struct{}
@@ -106,9 +107,9 @@ func TestDispatchMapsOpskitCommandOutcomes(t *testing.T) {
 		wantStatus int
 		wantError  string
 	}{
-		{name: "rejected", result: opskit.RejectedCommand("maintenance disabled"), wantStatus: http.StatusConflict, wantError: workerkit.ErrOpsCommandRejected.Error()},
-		{name: "rejected with error detail", result: opskit.CommandResult{State: opskit.StateNotReady, Accepted: false, Error: "maintenance disabled"}, wantStatus: http.StatusConflict, wantError: workerkit.ErrOpsCommandRejected.Error()},
-		{name: "failed", result: opskit.FailedCommand("refresh failed", errors.New("backend unavailable"), 0), wantStatus: http.StatusInternalServerError, wantError: "internal server error"},
+		{name: "rejected", result: opskit.RejectedCommand("maintenance disabled"), wantStatus: http.StatusConflict, wantError: "maintenance disabled"},
+		{name: "rejected with failure detail", result: opskit.CommandResult{State: opskit.StateNotReady, Accepted: false, Failure: &opskit.Failure{Code: "disabled", Message: "maintenance disabled"}}, wantStatus: http.StatusConflict, wantError: "maintenance disabled"},
+		{name: "failed", result: opskit.FailedCommandWithFailure("refresh failed", opskit.Failure{Code: "unavailable", Message: "backend unavailable"}, 0), wantStatus: http.StatusInternalServerError, wantError: "internal server error"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -119,6 +120,40 @@ func TestDispatchMapsOpskitCommandOutcomes(t *testing.T) {
 			rec := postDispatch(t, server, `{"worker":"worker","name":"echo"}`)
 			assertStatus(t, rec, tt.wantStatus)
 			assertErrorBody(t, rec, tt.wantError)
+		})
+	}
+}
+
+func TestDispatchDoesNotExposeHandlerTextThatWrapsMappedSentinel(t *testing.T) {
+	t.Parallel()
+
+	const secret = "postgres://user:pass@internal/commands"
+	tests := []struct {
+		name       string
+		cause      error
+		wantStatus int
+		wantError  string
+	}{
+		{name: "runtime not accepting", cause: workerkit.ErrRuntimeNotAcceptingWork, wantStatus: http.StatusServiceUnavailable, wantError: workerkit.ErrRuntimeNotAcceptingWork.Error()},
+		{name: "worker not accepting", cause: workerkit.ErrWorkerNotAcceptingWork, wantStatus: http.StatusConflict, wantError: workerkit.ErrWorkerNotAcceptingWork.Error()},
+		{name: "invalid state", cause: workerkit.ErrInvalidWorkerState, wantStatus: http.StatusConflict, wantError: workerkit.ErrInvalidWorkerState.Error()},
+		{name: "runtime saturated", cause: workerkit.ErrRuntimeSaturated, wantStatus: http.StatusTooManyRequests, wantError: workerkit.ErrRuntimeSaturated.Error()},
+		{name: "worker saturated", cause: workerkit.ErrWorkerSaturated, wantStatus: http.StatusTooManyRequests, wantError: workerkit.ErrWorkerSaturated.Error()},
+		{name: "opskit rejected", cause: workerkit.ErrOpsCommandRejected, wantStatus: http.StatusConflict, wantError: workerkit.ErrOpsCommandRejected.Error()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := workerkit.CommandHandlerFunc(func(context.Context, workerkit.CommandRequest) (workerkit.CommandResult, error) {
+				return workerkit.CommandResult{}, fmt.Errorf("%w: %s", tt.cause, secret)
+			})
+			server := newDispatchServer(t, handler)
+
+			rec := postDispatch(t, server, `{"worker":"worker","name":"echo"}`)
+			assertStatus(t, rec, tt.wantStatus)
+			assertErrorBody(t, rec, tt.wantError)
+			if bytes.Contains(rec.Body.Bytes(), []byte(secret)) {
+				t.Fatalf("dispatch response exposed private error detail: %s", rec.Body.String())
+			}
 		})
 	}
 }

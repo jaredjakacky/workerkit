@@ -8,7 +8,10 @@ import (
 	opskit "github.com/jaredjakacky/opskit"
 )
 
-const opskitRuntimeKind = "worker_runtime"
+const (
+	opskitRuntimeKind = "worker_runtime"
+	opskitWorkerKind  = "worker"
+)
 
 // Compile-time checks for Workerkit's Opskit component surface.
 var (
@@ -45,7 +48,7 @@ func (r *Runtime) Status(context.Context) opskit.Status {
 
 // Readiness returns the runtime's cached aggregate readiness for Opskit.
 func (r *Runtime) Readiness(context.Context) opskit.Readiness {
-	status := r.RuntimeStatus()
+	status, items := r.opskitReadinessSnapshot()
 	reason := "runtime ready"
 	if !status.Ready {
 		reason = "runtime not ready: state=" + string(status.State)
@@ -53,17 +56,39 @@ func (r *Runtime) Readiness(context.Context) opskit.Readiness {
 	return opskit.Readiness{
 		Ready:  status.Ready,
 		Reason: reason,
-		Components: []opskit.ReadinessItem{
-			{
-				Name:    r.ComponentInfo().Name,
-				Kind:    opskitRuntimeKind,
-				Policy:  opskit.ReadinessRequired,
-				Ready:   status.Ready,
-				State:   opskitStateFromRuntimeStatus(status),
-				Message: opskitRuntimeStatusMessage(status),
-			},
-		},
+		Items:  items,
 	}
+}
+
+func (r *Runtime) opskitReadinessSnapshot() (RuntimeStatus, []opskit.ReadinessItem) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	status := r.status
+	status.LastTransition = cloneLifecycleTransition(r.status.LastTransition)
+	items := make([]opskit.ReadinessItem, 0, len(r.workerOrder))
+	for _, name := range r.workerOrder {
+		workerStatus := r.workerStates[name].toWorkerStatus()
+		ready := opskitWorkerReady(workerStatus)
+		items = append(items, opskit.ReadinessItem{
+			Name:    workerStatus.LocalName,
+			Kind:    opskitWorkerKind,
+			Impact:  opskitReadinessImpact(r.config.readinessPolicy, r.workerConfigs[name]),
+			Ready:   ready,
+			State:   opskitStateFromWorkerStatus(workerStatus, ready),
+			Message: opskitWorkerStatusMessage(workerStatus, ready),
+		})
+	}
+	return status, items
+}
+
+func opskitReadinessImpact(policy ReadinessPolicy, cfg workerConfig) opskit.ReadinessImpact {
+	if policy == ReadyWhenAllWorkersReady || cfg.contributesToReadiness ||
+		cfg.failurePolicy == FailurePolicyMarkRuntimeUnready ||
+		cfg.failurePolicy == FailurePolicyFailRuntime {
+		return opskit.ReadinessImpactBlocking
+	}
+	return opskit.ReadinessImpactNonBlocking
 }
 
 // Inspect returns a safe local inspection snapshot for this runtime.
@@ -149,6 +174,17 @@ func opskitStateFromRuntimeStatus(status RuntimeStatus) opskit.State {
 	}
 }
 
+func opskitWorkerReady(status WorkerStatus) bool {
+	return status.State == StateRunning && status.Ready
+}
+
+func opskitStateFromWorkerStatus(status WorkerStatus, ready bool) opskit.State {
+	return opskitStateFromRuntimeStatus(RuntimeStatus{
+		State: status.State,
+		Ready: ready,
+	})
+}
+
 func (r *Runtime) readinessPolicy() ReadinessPolicy {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -166,6 +202,13 @@ func opskitRuntimeStatusMessage(status RuntimeStatus) string {
 		return "runtime ready: state=" + string(status.State)
 	}
 	return "runtime not ready: state=" + string(status.State)
+}
+
+func opskitWorkerStatusMessage(status WorkerStatus, ready bool) string {
+	if ready {
+		return "worker ready: state=" + string(status.State)
+	}
+	return "worker not ready: state=" + string(status.State)
 }
 
 func opskitRuntimeUpdatedAt(status RuntimeStatus) *time.Time {

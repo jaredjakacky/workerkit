@@ -24,7 +24,9 @@ type LifecycleTransition struct {
 // names and meanings are stable within a major version. Minor versions may add
 // fields, so clients should ignore unknown fields.
 type FailureInfo struct {
-	// Message is the failure message shown in status surfaces.
+	// Code is a stable, low-cardinality public failure code.
+	Code string `json:"code,omitempty"`
+	// Message is bounded, redacted failure text safe for status surfaces.
 	Message string `json:"message"`
 	// At is when the failure was recorded.
 	At time.Time `json:"at"`
@@ -42,7 +44,9 @@ type FailureInfo struct {
 type CommandFailureInfo struct {
 	// Command is the worker-owned command name that failed.
 	Command string `json:"command"`
-	// Message is the failure message shown in status surfaces.
+	// Code is a stable, low-cardinality public failure code.
+	Code string `json:"code,omitempty"`
+	// Message is bounded, redacted failure text safe for status surfaces.
 	Message string `json:"message"`
 	// At is when the failure was recorded.
 	At time.Time `json:"at"`

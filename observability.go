@@ -10,6 +10,9 @@ import (
 // The core runtime does not depend on a concrete telemetry backend. Adapters can
 // turn these events into logs, metrics, traces, or test assertions without
 // leaking backend-specific types into workers, commands, or status models.
+// Failure event Code and Message fields are safe operational presentation.
+// Cause fields are private diagnostics and must not be published or formatted
+// without application-owned policy.
 //
 // Observer implementations must be safe for concurrent use. Workerkit calls
 // observers synchronously on runtime execution paths, so implementations should
@@ -300,10 +303,15 @@ type CommandEndEvent struct {
 	Duration time.Duration
 	// Success reports whether dispatch completed without an error.
 	Success bool
-	// Err is the original command dispatch failure when dispatch failed.
-	Err error
-	// Message is a stable string representation of Err for simple observers.
+	// Code is a stable, low-cardinality public failure code. It is empty when
+	// Success is true.
+	Code string
+	// Message is safe public failure text. It is empty when Success is true.
 	Message string
+	// Cause is the original private command dispatch failure when dispatch
+	// failed. Observers must not publish or format it without application-owned
+	// policy.
+	Cause error `json:"-"`
 }
 
 // FailureEvent reports one worker lifecycle, background, or command failure
@@ -338,10 +346,13 @@ type FailureEvent struct {
 	Attempt int
 	// At is when the failure was observed.
 	At time.Time
-	// Err is the original failure value when available.
-	Err error
-	// Message is a stable string representation of Err for simple observers.
+	// Code is a stable, low-cardinality public failure code.
+	Code string
+	// Message is safe public failure text.
 	Message string
+	// Cause is the original private failure value when available. Observers must
+	// not publish or format it without application-owned policy.
+	Cause error `json:"-"`
 	// Panic reports whether the failure came from a recovered panic.
 	Panic bool
 }
