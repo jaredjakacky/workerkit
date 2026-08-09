@@ -47,6 +47,8 @@ func TestNewConfiguresProvidersAttributesAndInstruments(t *testing.T) {
 	for _, name := range []string{
 		"workerkit.command.dispatches",
 		"workerkit.command.duration",
+		"workerkit.check.executions",
+		"workerkit.check.duration",
 		"workerkit.failures",
 		"workerkit.readiness.changes",
 		"workerkit.lifecycle.transitions",
@@ -95,6 +97,16 @@ func TestNewReturnsMetricCreationErrors(t *testing.T) {
 			name:       "command duration",
 			metricName: "workerkit.command.duration",
 			want:       "create command duration metric",
+		},
+		{
+			name:       "check count",
+			metricName: "workerkit.check.executions",
+			want:       "create check count metric",
+		},
+		{
+			name:       "check duration",
+			metricName: "workerkit.check.duration",
+			want:       "create check duration metric",
 		},
 		{
 			name:       "failure count",
@@ -243,6 +255,107 @@ func TestCommandEndRecordsFailureSpanAndMetrics(t *testing.T) {
 	}
 	assertBoolAttr(t, commandCount.adds[0].attrs, "workerkit.command.success", false)
 	assertStringAttr(t, commandCount.adds[0].attrs, "workerkit.failure.code", "command_failed")
+}
+
+func TestStartCheckRecordsSpanAndBoundedMetrics(t *testing.T) {
+	t.Parallel()
+
+	observer, tracerProvider, meterProvider := newTestObserver(t)
+	startedAt := time.Date(2026, 5, 15, 10, 0, 0, 0, time.UTC)
+	endedAt := startedAt.Add(125 * time.Millisecond)
+
+	ctx, observation := observer.StartCheck(context.Background(), workerkit.CheckStartEvent{
+		Runtime:   "runtime-a",
+		Worker:    "runtime-a/checks",
+		Kind:      workerkit.CheckKindChecker,
+		StartedAt: startedAt,
+	})
+	observation.End(ctx, workerkit.CheckEndEvent{
+		Outcome:       workerkit.CheckOutcomeTimeout,
+		LoopContinues: true,
+		EndedAt:       endedAt,
+		Duration:      125 * time.Millisecond,
+	})
+
+	span := tracerProvider.tracer.onlySpan(t)
+	if span.name != "workerkit.check" {
+		t.Fatalf("span name = %q, want workerkit.check", span.name)
+	}
+	if !span.start.Equal(startedAt) || !span.end.Equal(endedAt) {
+		t.Fatalf("span timing = %s..%s, want %s..%s", span.start, span.end, startedAt, endedAt)
+	}
+	if span.statusCode != codes.Error || span.statusDescription != "check execution outcome: timeout" {
+		t.Fatalf("span status = %s %q, want error timeout", span.statusCode, span.statusDescription)
+	}
+	assertStringAttr(t, span.attrs, "workerkit.runtime", "runtime-a")
+	assertStringAttr(t, span.attrs, "workerkit.worker", "runtime-a/checks")
+	assertStringAttr(t, span.attrs, "workerkit.check.kind", string(workerkit.CheckKindChecker))
+	assertStringAttr(t, span.attrs, "workerkit.check.outcome", string(workerkit.CheckOutcomeTimeout))
+	assertBoolAttr(t, span.attrs, "workerkit.check.loop_continues", true)
+
+	checkCount := meterProvider.meter.counter("workerkit.check.executions")
+	if got := checkCount.total(); got != 1 {
+		t.Fatalf("check count = %d, want 1", got)
+	}
+	assertStringAttr(t, checkCount.adds[0].attrs, "workerkit.runtime", "runtime-a")
+	assertStringAttr(t, checkCount.adds[0].attrs, "workerkit.worker", "runtime-a/checks")
+	assertStringAttr(t, checkCount.adds[0].attrs, "workerkit.check.kind", string(workerkit.CheckKindChecker))
+	assertStringAttr(t, checkCount.adds[0].attrs, "workerkit.check.outcome", string(workerkit.CheckOutcomeTimeout))
+	assertBoolAttr(t, checkCount.adds[0].attrs, "workerkit.check.loop_continues", true)
+	assertNoAttr(t, checkCount.adds[0].attrs, "workerkit.check.message")
+	assertNoAttr(t, checkCount.adds[0].attrs, "error.message")
+
+	checkDuration := meterProvider.meter.histogram("workerkit.check.duration")
+	if len(checkDuration.records) != 1 || checkDuration.records[0].value != 0.125 {
+		t.Fatalf("check duration records = %#v, want one 0.125 second record", checkDuration.records)
+	}
+	assertStringAttr(t, checkDuration.records[0].attrs, "workerkit.check.outcome", string(workerkit.CheckOutcomeTimeout))
+}
+
+func TestCheckReadySpanIsSuccessfulAndCanceledSpanIsUnset(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name       string
+		outcome    workerkit.CheckOutcome
+		wantStatus codes.Code
+	}{
+		{name: "ready", outcome: workerkit.CheckOutcomeReady, wantStatus: codes.Ok},
+		{name: "canceled", outcome: workerkit.CheckOutcomeCanceled, wantStatus: codes.Unset},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			observer, tracerProvider, _ := newTestObserver(t)
+			ctx, observation := observer.StartCheck(context.Background(), workerkit.CheckStartEvent{})
+			observation.End(ctx, workerkit.CheckEndEvent{Outcome: tt.outcome, EndedAt: time.Now()})
+			if got := tracerProvider.tracer.onlySpan(t).statusCode; got != tt.wantStatus {
+				t.Fatalf("span status = %s, want %s", got, tt.wantStatus)
+			}
+		})
+	}
+}
+
+func TestCheckTelemetryNormalizesUnknownKindAndOutcome(t *testing.T) {
+	t.Parallel()
+
+	const unbounded = "tenant-secret-dynamic-value"
+	observer, tracerProvider, meterProvider := newTestObserver(t)
+	ctx, observation := observer.StartCheck(context.Background(), workerkit.CheckStartEvent{
+		Kind: workerkit.CheckKind(unbounded),
+	})
+	observation.End(ctx, workerkit.CheckEndEvent{
+		Outcome: workerkit.CheckOutcome(unbounded),
+		EndedAt: time.Now(),
+	})
+
+	span := tracerProvider.tracer.onlySpan(t)
+	assertStringAttr(t, span.attrs, "workerkit.check.kind", "unknown")
+	assertStringAttr(t, span.attrs, "workerkit.check.outcome", "unknown")
+	if strings.Contains(span.statusDescription, unbounded) {
+		t.Fatalf("span status exposed unbounded outcome: %q", span.statusDescription)
+	}
+	counter := meterProvider.meter.counter("workerkit.check.executions")
+	assertStringAttr(t, counter.adds[0].attrs, "workerkit.check.kind", "unknown")
+	assertStringAttr(t, counter.adds[0].attrs, "workerkit.check.outcome", "unknown")
 }
 
 func TestCommandEndRecordsMessageWhenErrorIsNil(t *testing.T) {
@@ -418,7 +531,9 @@ func TestNilInstrumentsDoNotPanic(t *testing.T) {
 		Worker:  "worker-a",
 		Command: "sync",
 	})
+	checkCtx, checkObservation := observer.StartCheck(ctx, workerkit.CheckStartEvent{})
 	observation.End(ctx, workerkit.CommandEndEvent{Success: true})
+	checkObservation.End(checkCtx, workerkit.CheckEndEvent{Outcome: workerkit.CheckOutcomeReady})
 	observer.ObserveFailure(context.Background(), workerkit.FailureEvent{Runtime: "runtime-a"})
 	observer.ObserveReadiness(context.Background(), workerkit.ReadinessEvent{Runtime: "runtime-a"})
 }
@@ -440,9 +555,11 @@ func TestObserverSupportsConcurrentUse(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			ctx, observation := observer.StartCommand(context.Background(), workerkit.CommandStartEvent{})
+			checkCtx, checkObservation := observer.StartCheck(ctx, workerkit.CheckStartEvent{})
 			observer.ObserveTransition(ctx, workerkit.TransitionEvent{})
 			observer.ObserveFailure(ctx, workerkit.FailureEvent{})
 			observer.ObserveReadiness(ctx, workerkit.ReadinessEvent{})
+			checkObservation.End(checkCtx, workerkit.CheckEndEvent{})
 			observation.End(ctx, workerkit.CommandEndEvent{})
 		}()
 	}

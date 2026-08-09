@@ -9,7 +9,7 @@
 // service setup and Servekit's default integration style. Use WithTracerProvider
 // and WithMeterProvider when an application wants explicit providers.
 //
-// Command observations create a command-scoped context before the worker-owned
-// command handler runs, so spans created by application code inside the handler
-// can be children of the Workerkit command span.
+// Command and managed check observations create operation-scoped contexts
+// before application code runs, so spans created inside command handlers,
+// Opskit Checkers, and CheckGroups can be children of the Workerkit span.
 package otel

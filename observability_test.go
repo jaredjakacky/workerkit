@@ -13,6 +13,8 @@ type panicObserver struct {
 	panicTransition bool
 	panicStart      bool
 	panicEnd        bool
+	panicCheckStart bool
+	panicCheckEnd   bool
 	panicFailure    bool
 	panicReadiness  bool
 }
@@ -30,6 +32,17 @@ func (o panicObserver) StartCommand(ctx context.Context, _ CommandStartEvent) (c
 	return ctx, CommandObservationFunc(func(context.Context, CommandEndEvent) {
 		if o.panicEnd {
 			panic("end panic")
+		}
+	})
+}
+
+func (o panicObserver) StartCheck(ctx context.Context, _ CheckStartEvent) (context.Context, CheckObservation) {
+	if o.panicCheckStart {
+		panic("check start panic")
+	}
+	return ctx, CheckObservationFunc(func(context.Context, CheckEndEvent) {
+		if o.panicCheckEnd {
+			panic("check end panic")
 		}
 	})
 }
@@ -105,6 +118,8 @@ type observerRecorder struct {
 	transitions []TransitionEvent
 	starts      []CommandStartEvent
 	ends        []CommandEndEvent
+	checkStarts []CheckStartEvent
+	checkEnds   []CheckEndEvent
 	failures    []FailureEvent
 	readiness   []ReadinessEvent
 }
@@ -145,6 +160,33 @@ func (o *observerRecorder) StartCommand(ctx context.Context, event CommandStartE
 	})
 }
 
+func (o *observerRecorder) StartCheck(ctx context.Context, event CheckStartEvent) (context.Context, CheckObservation) {
+	o.mu.Lock()
+	o.checkStarts = append(o.checkStarts, event)
+	o.mu.Unlock()
+	if o.events != nil {
+		o.events.add(o.name + ":check-start")
+	}
+	if o.derivedKey != nil {
+		ctx = context.WithValue(ctx, o.derivedKey, o.derivedValue)
+	}
+	var observedCtx context.Context = ctx
+	if o.nilCtx {
+		observedCtx = nil
+	}
+	if o.nilObs {
+		return observedCtx, nil
+	}
+	return observedCtx, CheckObservationFunc(func(_ context.Context, end CheckEndEvent) {
+		o.mu.Lock()
+		o.checkEnds = append(o.checkEnds, end)
+		o.mu.Unlock()
+		if o.events != nil {
+			o.events.add(o.name + ":check-end")
+		}
+	})
+}
+
 func (o *observerRecorder) ObserveFailure(_ context.Context, event FailureEvent) {
 	o.mu.Lock()
 	o.failures = append(o.failures, event)
@@ -167,6 +209,8 @@ type observerRecorderSnapshot struct {
 	transitions []TransitionEvent
 	starts      []CommandStartEvent
 	ends        []CommandEndEvent
+	checkStarts []CheckStartEvent
+	checkEnds   []CheckEndEvent
 	failures    []FailureEvent
 	readiness   []ReadinessEvent
 }
@@ -178,6 +222,8 @@ func (o *observerRecorder) snapshot() observerRecorderSnapshot {
 		transitions: append([]TransitionEvent(nil), o.transitions...),
 		starts:      append([]CommandStartEvent(nil), o.starts...),
 		ends:        append([]CommandEndEvent(nil), o.ends...),
+		checkStarts: append([]CheckStartEvent(nil), o.checkStarts...),
+		checkEnds:   append([]CheckEndEvent(nil), o.checkEnds...),
 		failures:    append([]FailureEvent(nil), o.failures...),
 		readiness:   append([]ReadinessEvent(nil), o.readiness...),
 	}
@@ -210,6 +256,32 @@ func TestCommandObservationFunc(t *testing.T) {
 	}
 }
 
+func TestCheckObservationFunc(t *testing.T) {
+	t.Parallel()
+
+	var nilFunc CheckObservationFunc
+	nilFunc.End(context.Background(), CheckEndEvent{})
+
+	called := false
+	want := CheckEndEvent{
+		Runtime:       "runtime",
+		Worker:        "runtime/checks",
+		Kind:          CheckKindChecker,
+		Outcome:       CheckOutcomeReady,
+		LoopContinues: true,
+	}
+	fn := CheckObservationFunc(func(_ context.Context, event CheckEndEvent) {
+		called = true
+		if event != want {
+			t.Fatalf("event = %#v, want %#v", event, want)
+		}
+	})
+	fn.End(context.Background(), want)
+	if !called {
+		t.Fatal("CheckObservationFunc was not called")
+	}
+}
+
 func TestNopObserver(t *testing.T) {
 	t.Parallel()
 
@@ -227,6 +299,14 @@ func TestNopObserver(t *testing.T) {
 	observer.ObserveFailure(ctx, FailureEvent{})
 	observer.ObserveReadiness(ctx, ReadinessEvent{})
 	observation.End(ctx, CommandEndEvent{})
+	checkCtx, checkObservation := observer.StartCheck(ctx, CheckStartEvent{})
+	if checkCtx != ctx {
+		t.Fatal("NopObserver changed check context")
+	}
+	if _, ok := checkObservation.(NopCheckObservation); !ok {
+		t.Fatalf("check observation = %T, want NopCheckObservation", checkObservation)
+	}
+	checkObservation.End(checkCtx, CheckEndEvent{})
 }
 
 func TestMultiObserverNoObserversReturnsNopObserver(t *testing.T) {
@@ -381,6 +461,60 @@ func TestMultiObserverEndsSuccessfullyStartedCommandObservationsAfterPanic(t *te
 	}
 }
 
+func TestMultiObserverStartCheckPropagatesContextAndEndsReverseOrder(t *testing.T) {
+	t.Parallel()
+
+	events := &recordingEventLog{}
+	firstKey := contextKey("first-check")
+	secondKey := contextKey("second-check")
+	first := &observerRecorder{name: "first", events: events, derivedKey: firstKey, derivedValue: "first-value"}
+	second := &observerRecorder{name: "second", events: events, derivedKey: secondKey, derivedValue: "second-value"}
+
+	observer := MultiObserver(first, &commandObservationRecorder{}, second)
+	checkObserver, ok := observer.(CheckExecutionObserver)
+	if !ok {
+		t.Fatalf("MultiObserver result = %T, want CheckExecutionObserver", observer)
+	}
+	ctx, observation := checkObserver.StartCheck(context.Background(), CheckStartEvent{
+		Runtime: "runtime",
+		Worker:  "runtime/checks",
+		Kind:    CheckKindChecker,
+	})
+	if ctx.Value(firstKey) != "first-value" || ctx.Value(secondKey) != "second-value" {
+		t.Fatalf("derived check context = %#v, want both observer values", ctx)
+	}
+	observation.End(ctx, CheckEndEvent{Outcome: CheckOutcomeReady, LoopContinues: true})
+
+	want := []string{"first:check-start", "second:check-start", "second:check-end", "first:check-end"}
+	if got := events.snapshot(); !slices.Equal(got, want) {
+		t.Fatalf("events = %#v, want %#v", got, want)
+	}
+}
+
+func TestMultiObserverCheckObservationRecoversPanics(t *testing.T) {
+	t.Parallel()
+
+	first := &observerRecorder{}
+	second := &observerRecorder{}
+	observer := MultiObserver(
+		first,
+		panicObserver{panicCheckStart: true},
+		panicObserver{panicCheckEnd: true},
+		second,
+	).(CheckExecutionObserver)
+
+	ctx, observation := observer.StartCheck(context.Background(), CheckStartEvent{})
+	observation.End(ctx, CheckEndEvent{})
+	for name, events := range map[string]observerRecorderSnapshot{
+		"first":  first.snapshot(),
+		"second": second.snapshot(),
+	} {
+		if len(events.checkStarts) != 1 || len(events.checkEnds) != 1 {
+			t.Fatalf("%s check events = %#v, want one start and end", name, events)
+		}
+	}
+}
+
 func TestSafeObserverNilReturnsNopObserver(t *testing.T) {
 	t.Parallel()
 
@@ -425,6 +559,64 @@ func TestSafeObserverWrapsCommandObservationAndRecoversEndPanic(t *testing.T) {
 	observation.End(ctx, CommandEndEvent{})
 }
 
+func TestSafeObserverWrapsOptionalCheckObservation(t *testing.T) {
+	t.Parallel()
+
+	base := context.WithValue(context.Background(), contextKey("base-check"), "value")
+	observer := SafeObserver(panicObserver{panicCheckEnd: true})
+	checkObserver, ok := observer.(CheckExecutionObserver)
+	if !ok {
+		t.Fatalf("SafeObserver result = %T, want CheckExecutionObserver", observer)
+	}
+	ctx, observation := checkObserver.StartCheck(base, CheckStartEvent{})
+	if ctx != base {
+		t.Fatal("SafeObserver changed check context")
+	}
+	observation.End(ctx, CheckEndEvent{})
+
+	observer = SafeObserver(panicObserver{panicCheckStart: true})
+	ctx, observation = observer.(CheckExecutionObserver).StartCheck(base, CheckStartEvent{})
+	if ctx != base {
+		t.Fatal("SafeObserver changed context after StartCheck panic")
+	}
+	if _, ok := observation.(NopCheckObservation); !ok {
+		t.Fatalf("observation = %T, want NopCheckObservation", observation)
+	}
+}
+
+func TestSafeObserverWithoutCheckCapabilityUsesNoop(t *testing.T) {
+	t.Parallel()
+
+	base := context.Background()
+	observer := SafeObserver(&commandObservationRecorder{})
+	checkObserver, ok := observer.(CheckExecutionObserver)
+	if !ok {
+		t.Fatalf("SafeObserver result = %T, want CheckExecutionObserver", observer)
+	}
+	ctx, observation := checkObserver.StartCheck(base, CheckStartEvent{})
+	if ctx != base {
+		t.Fatal("SafeObserver changed context for observer without check capability")
+	}
+	if _, ok := observation.(NopCheckObservation); !ok {
+		t.Fatalf("observation = %T, want NopCheckObservation", observation)
+	}
+}
+
+func TestSafeObserverStartCheckUsesFallbacksForNilReturns(t *testing.T) {
+	t.Parallel()
+
+	base := context.Background()
+	recorder := &observerRecorder{nilCtx: true, nilObs: true}
+	observer := SafeObserver(recorder).(CheckExecutionObserver)
+	ctx, observation := observer.StartCheck(base, CheckStartEvent{})
+	if ctx != base {
+		t.Fatal("SafeObserver did not retain the original check context")
+	}
+	if _, ok := observation.(NopCheckObservation); !ok {
+		t.Fatalf("observation = %T, want NopCheckObservation", observation)
+	}
+}
+
 func TestSafeObserverStartCommandUsesFallbacksForNilReturns(t *testing.T) {
 	t.Parallel()
 
@@ -454,9 +646,11 @@ func TestMultiObserverSupportsConcurrentCallbacks(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			ctx, observation := observer.StartCommand(context.Background(), CommandStartEvent{})
+			checkCtx, checkObservation := observer.(CheckExecutionObserver).StartCheck(ctx, CheckStartEvent{})
 			observer.ObserveTransition(ctx, TransitionEvent{})
 			observer.ObserveFailure(ctx, FailureEvent{})
 			observer.ObserveReadiness(ctx, ReadinessEvent{})
+			checkObservation.End(checkCtx, CheckEndEvent{})
 			observation.End(ctx, CommandEndEvent{})
 		}()
 	}
@@ -467,6 +661,7 @@ func TestMultiObserverSupportsConcurrentCallbacks(t *testing.T) {
 		"second": second.snapshot(),
 	} {
 		if len(events.starts) != calls || len(events.ends) != calls ||
+			len(events.checkStarts) != calls || len(events.checkEnds) != calls ||
 			len(events.transitions) != calls || len(events.failures) != calls ||
 			len(events.readiness) != calls {
 			t.Fatalf("%s events = %#v, want %d of each callback", name, events, calls)

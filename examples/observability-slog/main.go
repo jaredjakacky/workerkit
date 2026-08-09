@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	opskit "github.com/jaredjakacky/opskit"
 	workerkit "github.com/jaredjakacky/workerkit"
 	"github.com/jaredjakacky/workerkit/retry"
 	"github.com/jaredjakacky/workerkit/slogobserver"
@@ -49,10 +50,25 @@ func main() {
 	); err != nil {
 		log.Fatal(err)
 	}
+	checkRan := make(chan struct{})
+	if err := runtime.Register(workerkit.WorkerSpec{
+		Name:        "checks",
+		Description: "Emits managed check execution observations.",
+		Worker: workerkit.NewCheckLoop(
+			opskit.CheckFunc(func(context.Context) opskit.CheckResult {
+				checkRan <- struct{}{}
+				return opskit.ReadyCheck("dependency reachable", 0)
+			}),
+			workerkit.WithCheckInterval(time.Hour),
+		),
+	}); err != nil {
+		log.Fatal(err)
+	}
 
 	if err := runtime.StartAll(ctx); err != nil {
 		log.Fatal(err)
 	}
+	<-checkRan
 
 	if _, err := runtime.Dispatch(ctx, workerkit.CommandRequest{
 		Worker: "worker",

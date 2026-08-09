@@ -17,7 +17,8 @@ import (
 // Observer implementations must be safe for concurrent use. Workerkit calls
 // observers synchronously on runtime execution paths, so implementations should
 // avoid blocking work. StartCommand may return a derived context that Workerkit
-// passes to the command handler.
+// passes to the command handler. CheckExecutionObserver is an optional extension
+// for managed Opskit check-loop executions.
 //
 // Lifecycle observations run inside the runtime's serialized lifecycle
 // operation. Observer callbacks must not call public Runtime lifecycle methods
@@ -34,6 +35,42 @@ type Observer interface {
 	ObserveFailure(context.Context, FailureEvent)
 	ObserveReadiness(context.Context, ReadinessEvent)
 }
+
+// CheckExecutionObserver is the optional Observer capability for managed
+// Opskit check-loop executions.
+//
+// Workerkit detects this capability on the Observer supplied through
+// WithObserver. Existing Observer implementations do not need to implement it.
+// StartCheck may return a derived context that Workerkit passes to the Checker
+// or CheckGroup and its configured result callback.
+type CheckExecutionObserver interface {
+	Observer
+	StartCheck(context.Context, CheckStartEvent) (context.Context, CheckObservation)
+}
+
+// CheckObservation receives the end of one managed check-loop execution.
+//
+// Workerkit calls End exactly once for each started check observation.
+type CheckObservation interface {
+	End(context.Context, CheckEndEvent)
+}
+
+// CheckObservationFunc adapts a function into a CheckObservation.
+type CheckObservationFunc func(context.Context, CheckEndEvent)
+
+// End implements CheckObservation.
+func (f CheckObservationFunc) End(ctx context.Context, event CheckEndEvent) {
+	if f == nil {
+		return
+	}
+	f(ctx, event)
+}
+
+// NopCheckObservation discards the end of a check observation.
+type NopCheckObservation struct{}
+
+// End implements CheckObservation.
+func (NopCheckObservation) End(context.Context, CheckEndEvent) {}
 
 // CommandObservation receives the end of a command dispatch observation.
 //
@@ -70,6 +107,11 @@ func (NopObserver) StartCommand(ctx context.Context, _ CommandStartEvent) (conte
 	return ctx, NopCommandObservation{}
 }
 
+// StartCheck implements CheckExecutionObserver.
+func (NopObserver) StartCheck(ctx context.Context, _ CheckStartEvent) (context.Context, CheckObservation) {
+	return ctx, NopCheckObservation{}
+}
+
 // ObserveFailure implements Observer.
 func (NopObserver) ObserveFailure(context.Context, FailureEvent) {}
 
@@ -78,10 +120,10 @@ func (NopObserver) ObserveReadiness(context.Context, ReadinessEvent) {}
 
 // MultiObserver fans telemetry events out to multiple observers.
 //
-// Nil observers are ignored. Command observations end in reverse observer order
-// to mirror stacked span or cleanup semantics. Panics from one child observer
-// are recovered so later observers still receive the event. Command
-// observations that were successfully started are always attempted during End.
+// Nil observers are ignored. Command and check observations end in reverse
+// observer order to mirror stacked span or cleanup semantics. Panics from one
+// child observer are recovered so later observers still receive the event.
+// Observations that were successfully started are always attempted during End.
 func MultiObserver(observers ...Observer) Observer {
 	kept := make([]Observer, 0, len(observers))
 	for _, observer := range observers {
@@ -123,6 +165,28 @@ func (o multiObserver) StartCommand(ctx context.Context, event CommandStartEvent
 	return observedCtx, multiCommandObservation{observations: observations}
 }
 
+func (o multiObserver) StartCheck(ctx context.Context, event CheckStartEvent) (context.Context, CheckObservation) {
+	observedCtx := ctx
+	observations := make([]CheckObservation, 0, len(o.observers))
+	for _, observer := range o.observers {
+		checkObserver, ok := observer.(CheckExecutionObserver)
+		if !ok {
+			continue
+		}
+		nextCtx, observation := startCheckSafely(checkObserver, observedCtx, event)
+		if nextCtx != nil {
+			observedCtx = nextCtx
+		}
+		if observation != nil {
+			observations = append(observations, observation)
+		}
+	}
+	if len(observations) == 0 {
+		return observedCtx, NopCheckObservation{}
+	}
+	return observedCtx, multiCheckObservation{observations: observations}
+}
+
 func (o multiObserver) ObserveFailure(ctx context.Context, event FailureEvent) {
 	for _, observer := range o.observers {
 		observeFailureSafely(observer, ctx, event)
@@ -137,6 +201,16 @@ func (o multiObserver) ObserveReadiness(ctx context.Context, event ReadinessEven
 
 type multiCommandObservation struct {
 	observations []CommandObservation
+}
+
+type multiCheckObservation struct {
+	observations []CheckObservation
+}
+
+func (o multiCheckObservation) End(ctx context.Context, event CheckEndEvent) {
+	for i := len(o.observations) - 1; i >= 0; i-- {
+		endCheckObservationSafely(o.observations[i], ctx, event)
+	}
 }
 
 func (o multiCommandObservation) End(ctx context.Context, event CommandEndEvent) {
@@ -161,6 +235,17 @@ func startCommandSafely(observer Observer, ctx context.Context, event CommandSta
 	return observer.StartCommand(ctx, event)
 }
 
+func startCheckSafely(observer CheckExecutionObserver, ctx context.Context, event CheckStartEvent) (observedCtx context.Context, observation CheckObservation) {
+	observedCtx = ctx
+	defer func() {
+		if recover() != nil {
+			observedCtx = ctx
+			observation = nil
+		}
+	}()
+	return observer.StartCheck(ctx, event)
+}
+
 func observeFailureSafely(observer Observer, ctx context.Context, event FailureEvent) {
 	defer recoverObserverPanic()
 	observer.ObserveFailure(ctx, event)
@@ -179,8 +264,17 @@ func endCommandObservationSafely(observation CommandObservation, ctx context.Con
 	observation.End(ctx, event)
 }
 
+func endCheckObservationSafely(observation CheckObservation, ctx context.Context, event CheckEndEvent) {
+	if observation == nil {
+		return
+	}
+	defer recoverObserverPanic()
+	observation.End(ctx, event)
+}
+
 // SafeObserver wraps an observer so telemetry panics do not escape runtime
-// lifecycle or command dispatch paths.
+// lifecycle, command dispatch, or managed check execution paths. The returned
+// observer preserves the optional CheckExecutionObserver capability.
 //
 // If observer is nil, SafeObserver returns NopObserver{}.
 func SafeObserver(observer Observer) Observer {
@@ -219,6 +313,30 @@ func (o safeObserver) StartCommand(ctx context.Context, event CommandStartEvent)
 	return observedCtx, observation
 }
 
+func (o safeObserver) StartCheck(ctx context.Context, event CheckStartEvent) (observedCtx context.Context, observation CheckObservation) {
+	observedCtx = ctx
+	observation = NopCheckObservation{}
+	checkObserver, ok := o.observer.(CheckExecutionObserver)
+	if !ok {
+		return observedCtx, observation
+	}
+	defer func() {
+		if recover() != nil {
+			observedCtx = ctx
+			observation = NopCheckObservation{}
+		}
+	}()
+
+	nextCtx, nextObservation := checkObserver.StartCheck(ctx, event)
+	if nextCtx != nil {
+		observedCtx = nextCtx
+	}
+	if nextObservation != nil {
+		observation = safeCheckObservation{observation: nextObservation}
+	}
+	return observedCtx, observation
+}
+
 func (o safeObserver) ObserveFailure(ctx context.Context, event FailureEvent) {
 	defer recoverObserverPanic()
 	o.observer.ObserveFailure(ctx, event)
@@ -231,6 +349,15 @@ func (o safeObserver) ObserveReadiness(ctx context.Context, event ReadinessEvent
 
 type safeCommandObservation struct {
 	observation CommandObservation
+}
+
+type safeCheckObservation struct {
+	observation CheckObservation
+}
+
+func (o safeCheckObservation) End(ctx context.Context, event CheckEndEvent) {
+	defer recoverObserverPanic()
+	o.observation.End(ctx, event)
 }
 
 func (o safeCommandObservation) End(ctx context.Context, event CommandEndEvent) {
@@ -257,6 +384,69 @@ type TransitionEvent struct {
 	To LifecycleState
 	// At is when the transition was observed.
 	At time.Time
+}
+
+// CheckKind identifies the Opskit execution hook managed by a check loop.
+type CheckKind string
+
+const (
+	// CheckKindChecker identifies one opskit.Checker execution.
+	CheckKindChecker CheckKind = "checker"
+	// CheckKindGroup identifies one opskit.CheckGroup execution.
+	CheckKindGroup CheckKind = "check_group"
+)
+
+// CheckOutcome is the bounded operational result of one managed check-loop
+// execution.
+type CheckOutcome string
+
+const (
+	// CheckOutcomeReady reports that execution completed with a ready result.
+	CheckOutcomeReady CheckOutcome = "ready"
+	// CheckOutcomeNotReady reports that execution completed with a not-ready result.
+	CheckOutcomeNotReady CheckOutcome = "not_ready"
+	// CheckOutcomeTimeout reports that the per-execution deadline expired.
+	CheckOutcomeTimeout CheckOutcome = "timeout"
+	// CheckOutcomeCanceled reports that the execution context was canceled.
+	CheckOutcomeCanceled CheckOutcome = "canceled"
+	// CheckOutcomePanic reports a panic recovered from the managed execution path.
+	CheckOutcomePanic CheckOutcome = "panic"
+	// CheckOutcomeError reports a Workerkit integration error after execution.
+	CheckOutcomeError CheckOutcome = "error"
+)
+
+// CheckStartEvent reports the start of one managed Opskit check-loop execution.
+type CheckStartEvent struct {
+	// Runtime is the runtime name that emitted the event.
+	Runtime string
+	// Worker is the fully qualified check-loop worker name.
+	Worker string
+	// Kind identifies whether the worker executes a Checker or CheckGroup.
+	Kind CheckKind
+	// StartedAt is when Workerkit began the iteration.
+	StartedAt time.Time
+}
+
+// CheckEndEvent reports the end of one managed Opskit check-loop execution.
+type CheckEndEvent struct {
+	// Runtime is the runtime name that emitted the event.
+	Runtime string
+	// Worker is the fully qualified check-loop worker name.
+	Worker string
+	// Kind identifies whether the worker executes a Checker or CheckGroup.
+	Kind CheckKind
+	// Outcome is the bounded execution result.
+	Outcome CheckOutcome
+	// LoopContinues reports whether this execution outcome permits the loop to
+	// continue. Independent lifecycle cancellation may still stop the loop before
+	// another iteration begins.
+	LoopContinues bool
+	// StartedAt is when Workerkit began the iteration.
+	StartedAt time.Time
+	// EndedAt is when Workerkit completed outcome and continuation classification.
+	EndedAt time.Time
+	// Duration is EndedAt minus StartedAt.
+	Duration time.Duration
 }
 
 // CommandStartEvent reports the start of one command dispatch.
@@ -314,12 +504,15 @@ type CommandEndEvent struct {
 	Cause error `json:"-"`
 }
 
-// FailureEvent reports one worker lifecycle, background, or command failure
-// observed by the runtime.
+// FailureEvent reports one worker lifecycle, background, cleanup, or command
+// failure observed by the runtime.
 //
 // Command is empty for worker lifecycle failures.
 // Background failures reported through WorkerRuntime.ReportFailure also have an
 // empty Command.
+// Failed automatic LoopWorker cleanup attempts emit a separate event, using
+// FailureCodeLoopCleanupFailed by default, while preserving the primary loop
+// failure in worker status.
 // Lifecycle retry attempt failures update worker status but do not emit
 // FailureEvent until the worker enters StateFailed. Command handler returned
 // errors emit FailureEvent per failed attempt, including attempts that are later

@@ -28,7 +28,9 @@ const (
 	// It is not by itself a global command admission cutoff.
 	StateDraining LifecycleState = "draining"
 
-	// StateStopping means the component is actively shutting down.
+	// StateStopping means the component is actively shutting down. For runtime
+	// aggregate status, this reports that at least one worker is stopping. It is
+	// not by itself a global command admission cutoff.
 	StateStopping LifecycleState = "stopping"
 
 	// StateStopped means the component intentionally completed shutdown.

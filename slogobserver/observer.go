@@ -31,8 +31,8 @@ func WithAttributes(attrs ...slog.Attr) Option {
 	}
 }
 
-// Observer converts Workerkit runtime telemetry events into structured slog
-// records.
+// Observer converts Workerkit runtime telemetry events, including optional
+// managed check execution observations, into structured slog records.
 type Observer struct {
 	logger *slog.Logger
 	config config
@@ -79,6 +79,35 @@ func (o *Observer) StartCommand(ctx context.Context, event workerkit.CommandStar
 		command:    event.Command,
 		dispatchID: event.DispatchID,
 	}
+}
+
+// StartCheck implements workerkit.CheckExecutionObserver.
+func (o *Observer) StartCheck(ctx context.Context, event workerkit.CheckStartEvent) (context.Context, workerkit.CheckObservation) {
+	return ctx, checkObservation{
+		observer: o,
+		runtime:  event.Runtime,
+		worker:   event.Worker,
+		kind:     event.Kind,
+	}
+}
+
+type checkObservation struct {
+	observer *Observer
+	runtime  string
+	worker   string
+	kind     workerkit.CheckKind
+}
+
+func (o checkObservation) End(ctx context.Context, event workerkit.CheckEndEvent) {
+	o.observer.logger.LogAttrs(ctx, o.observer.config.level, "workerkit check execution completed", o.observer.attrs(
+		o.runtime,
+		o.worker,
+		"",
+		slog.String("check_kind", string(o.kind)),
+		slog.String("check_outcome", string(event.Outcome)),
+		slog.Bool("loop_continues", event.LoopContinues),
+		slog.Duration("duration", event.Duration),
+	)...)
 }
 
 type commandObservation struct {
@@ -165,3 +194,4 @@ func (o *Observer) attrs(runtime string, worker string, command string, extra ..
 }
 
 var _ workerkit.Observer = (*Observer)(nil)
+var _ workerkit.CheckExecutionObserver = (*Observer)(nil)

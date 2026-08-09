@@ -297,7 +297,7 @@ if err := runtime.Register(commandWorker,
 }
 ```
 
-`NewCheckLoop` and `NewCheckGroupLoop` return normal Workerkit workers. Workerkit owns their interval, jitter, cooperative timeout, cancellation, panic recovery, and readiness/failure integration. A checker cannot be forcibly interrupted, but a result returned after its deadline is not applied to readiness. `CommandFromOpskit` returns a normal command spec, so dispatch keeps Workerkit admission, timeout, retry, concurrency, panic, observation, and lifecycle behavior.
+`NewCheckLoop` and `NewCheckGroupLoop` return normal Workerkit workers. Workerkit owns their interval, jitter, cooperative timeout, cancellation, panic recovery, readiness/failure integration, and bounded execution observation. The first-party slog and OpenTelemetry observers record each iteration without copying rich or potentially unbounded Opskit result payloads into core telemetry. A checker cannot be forcibly interrupted, but a result returned after its deadline is not applied to readiness. `CommandFromOpskit` returns a normal command spec, so dispatch keeps Workerkit admission, timeout, retry, concurrency, panic, observation, and lifecycle behavior.
 
 `opshttp` is an optional Workerkit-specific HTTP control surface. It is useful when operators specifically need Workerkit command dispatch or privileged lifecycle controls; it is not the primary read-only/readiness composition path. No routes are mounted unless a control group is explicitly enabled.
 

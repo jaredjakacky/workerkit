@@ -627,6 +627,336 @@ func TestLoopWorkerUnexpectedErrorExitReportsFailure(t *testing.T) {
 	}
 }
 
+func TestLoopWorkerFailureCleanupErrorBlocksRestartUntilStopRetrySucceeds(t *testing.T) {
+	const privateCleanupDetail = "broker unsubscribe token=private"
+	loopErr := errors.New("loop failed")
+	cleanupErr := errors.New(privateCleanupDetail)
+	loopRelease := make(chan struct{})
+	started := make(chan int32, 2)
+	cleanupAttempts := make(chan int32, 3)
+	var starts atomic.Int32
+	var stops atomic.Int32
+	observer := &recordingObserver{}
+	worker := NewLoopWorker(
+		func(ctx context.Context, _ WorkerRuntime) error {
+			n := starts.Add(1)
+			started <- n
+			if n == 1 {
+				<-loopRelease
+				return loopErr
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		WithLoopStop(func(context.Context, WorkerRuntime) error {
+			n := stops.Add(1)
+			cleanupAttempts <- n
+			if n == 1 {
+				return cleanupErr
+			}
+			return nil
+		}),
+	)
+	rt := newTestRuntime(t, WithObserver(observer))
+	if err := rt.Register(WorkerSpec{Name: "loop", Worker: worker}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "loop"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	if got := readLoopAttempt(t, started); got != 1 {
+		t.Fatalf("first loop generation = %d, want 1", got)
+	}
+
+	close(loopRelease)
+	if got := readLoopAttempt(t, cleanupAttempts); got != 1 {
+		t.Fatalf("automatic cleanup attempt = %d, want 1", got)
+	}
+	failed := waitForLoopState(t, rt, StateFailed)
+	if failed.Status.LastFailure == nil || failed.Status.LastFailure.Code != FailureCodeWorkerFailed {
+		t.Fatalf("LastFailure = %#v, want original loop failure", failed.Status.LastFailure)
+	}
+	event := waitForLoopFailureEvent(t, observer, cleanupErr)
+	if event.Code != FailureCodeLoopCleanupFailed || event.Message != "loop worker cleanup failed" {
+		t.Fatalf("cleanup FailureEvent = %#v, want safe cleanup presentation", event)
+	}
+	if strings.Contains(event.Message, privateCleanupDetail) {
+		t.Fatalf("cleanup FailureEvent exposed private cause: %#v", event)
+	}
+	failures := observer.snapshot().failures
+	if len(failures) < 2 || !errors.Is(failures[0].Cause, loopErr) || !errors.Is(failures[1].Cause, cleanupErr) {
+		t.Fatalf("failure events = %#v, want loop failure followed by cleanup failure", failures)
+	}
+
+	if err := rt.Start(context.Background(), "loop"); !errors.Is(err, ErrLoopWorkerActive) {
+		t.Fatalf("Start with pending cleanup error = %v, want ErrLoopWorkerActive", err)
+	}
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("loop starts = %d, want 1 before cleanup succeeds", got)
+	}
+	preserved := waitForLoopState(t, rt, StateFailed)
+	if preserved.Status.LastFailure == nil || preserved.Status.LastFailure.Code != FailureCodeWorkerFailed {
+		t.Fatalf("LastFailure after rejected restart = %#v, want original loop failure", preserved.Status.LastFailure)
+	}
+
+	if err := rt.Stop(context.Background(), "loop"); err != nil {
+		t.Fatalf("cleanup retry Stop returned error: %v", err)
+	}
+	if got := readLoopAttempt(t, cleanupAttempts); got != 2 {
+		t.Fatalf("cleanup retry attempt = %d, want 2", got)
+	}
+	if err := rt.Start(context.Background(), "loop"); err != nil {
+		t.Fatalf("restart after successful cleanup returned error: %v", err)
+	}
+	if got := readLoopAttempt(t, started); got != 2 {
+		t.Fatalf("second loop generation = %d, want 2", got)
+	}
+	t.Cleanup(func() {
+		_ = rt.Stop(context.Background(), "loop")
+	})
+}
+
+func TestLoopWorkerStopRetriesCleanupAfterHookTimeout(t *testing.T) {
+	var attempts atomic.Int32
+	worker := NewLoopWorker(
+		func(ctx context.Context, _ WorkerRuntime) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		WithLoopStop(func(ctx context.Context, _ WorkerRuntime) error {
+			if attempts.Add(1) == 1 {
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			return nil
+		}),
+	)
+	rt := newTestRuntime(t)
+	if err := rt.Register(
+		WorkerSpec{Name: "loop", Worker: worker},
+		WithWorkerStopTimeout(5*time.Millisecond),
+	); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "loop"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	if err := rt.Stop(context.Background(), "loop"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first Stop error = %v, want DeadlineExceeded", err)
+	}
+	failed := waitForLoopState(t, rt, StateFailed)
+	if failed.Status.LastFailure == nil || failed.Status.LastFailure.Code != FailureCodeLoopCleanupFailed {
+		t.Fatalf("LastFailure = %#v, want safe cleanup failure", failed.Status.LastFailure)
+	}
+	if err := rt.Start(context.Background(), "loop"); !errors.Is(err, ErrLoopWorkerActive) {
+		t.Fatalf("Start after timed-out cleanup error = %v, want ErrLoopWorkerActive", err)
+	}
+	if err := rt.Stop(context.Background(), "loop"); err != nil {
+		t.Fatalf("cleanup retry Stop returned error: %v", err)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("cleanup attempts = %d, want 2", got)
+	}
+}
+
+func TestLoopWorkerFailedStartCleanupErrorBlocksRestartUntilStopRetrySucceeds(t *testing.T) {
+	startErr := errors.New("partial start failed")
+	cleanupErr := errors.New("partial start cleanup failed")
+	var starts atomic.Int32
+	var stops atomic.Int32
+	worker := NewLoopWorker(
+		func(ctx context.Context, _ WorkerRuntime) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		WithLoopStart(func(context.Context, WorkerRuntime) error {
+			if starts.Add(1) == 1 {
+				return startErr
+			}
+			return nil
+		}),
+		WithLoopStop(func(context.Context, WorkerRuntime) error {
+			if stops.Add(1) == 1 {
+				return cleanupErr
+			}
+			return nil
+		}),
+	)
+	rt := newTestRuntime(t)
+	if err := rt.Register(WorkerSpec{Name: "loop", Worker: worker}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "loop"); !errors.Is(err, startErr) {
+		t.Fatalf("first Start error = %v, want %v", err, startErr)
+	}
+	if err := rt.Stop(context.Background(), "loop"); !errors.Is(err, cleanupErr) {
+		t.Fatalf("first cleanup Stop error = %v, want %v", err, cleanupErr)
+	}
+	if err := rt.Start(context.Background(), "loop"); !errors.Is(err, ErrLoopWorkerActive) {
+		t.Fatalf("Start with pending partial-start cleanup error = %v, want ErrLoopWorkerActive", err)
+	}
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("start hook calls = %d, want 1 before cleanup succeeds", got)
+	}
+	if err := rt.Stop(context.Background(), "loop"); err != nil {
+		t.Fatalf("cleanup retry Stop returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "loop"); err != nil {
+		t.Fatalf("Start after successful cleanup returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = rt.Stop(context.Background(), "loop")
+	})
+}
+
+func TestLoopWorkerStopJoinsFailedFailureCleanupBeforeRetrying(t *testing.T) {
+	cleanupErr := errors.New("cleanup failed")
+	loopRelease := make(chan struct{})
+	firstEntered := make(chan struct{})
+	firstRelease := make(chan struct{})
+	retryEntered := make(chan struct{})
+	var attempts atomic.Int32
+	var active atomic.Int32
+	var maxActive atomic.Int32
+	worker := NewLoopWorker(
+		func(context.Context, WorkerRuntime) error {
+			<-loopRelease
+			return errors.New("loop failed")
+		},
+		WithLoopStop(func(context.Context, WorkerRuntime) error {
+			current := active.Add(1)
+			defer active.Add(-1)
+			for {
+				max := maxActive.Load()
+				if current <= max || maxActive.CompareAndSwap(max, current) {
+					break
+				}
+			}
+			switch attempts.Add(1) {
+			case 1:
+				close(firstEntered)
+				<-firstRelease
+				return cleanupErr
+			case 2:
+				close(retryEntered)
+				return nil
+			default:
+				return errors.New("unexpected cleanup attempt")
+			}
+		}),
+	)
+	rt := newTestRuntime(t)
+	if err := rt.Register(WorkerSpec{Name: "loop", Worker: worker}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "loop"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	close(loopRelease)
+	select {
+	case <-firstEntered:
+	case <-time.After(time.Second):
+		t.Fatal("automatic cleanup did not start")
+	}
+	waitForLoopState(t, rt, StateFailed)
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- rt.Stop(context.Background(), "loop") }()
+	waitForLoopState(t, rt, StateStopping)
+	close(firstRelease)
+	select {
+	case <-retryEntered:
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not retry failed automatic cleanup")
+	}
+	if err := <-stopDone; err != nil {
+		t.Fatalf("Stop returned error: %v", err)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("cleanup attempts = %d, want 2", got)
+	}
+	if got := maxActive.Load(); got != 1 {
+		t.Fatalf("maximum concurrent cleanup attempts = %d, want 1", got)
+	}
+}
+
+func TestLoopWorkerCleanupPanicLeavesCleanupPending(t *testing.T) {
+	var attempts atomic.Int32
+	worker := NewLoopWorker(
+		func(ctx context.Context, _ WorkerRuntime) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		WithLoopStop(func(context.Context, WorkerRuntime) error {
+			if attempts.Add(1) == 1 {
+				panic("cleanup panic")
+			}
+			return nil
+		}),
+	)
+	rt := newTestRuntime(t)
+	if err := rt.Register(WorkerSpec{Name: "loop", Worker: worker}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "loop"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	if err := rt.Stop(context.Background(), "loop"); err == nil {
+		t.Fatal("Stop returned nil after cleanup panic")
+	}
+	if err := rt.Start(context.Background(), "loop"); !errors.Is(err, ErrLoopWorkerActive) {
+		t.Fatalf("Start after cleanup panic error = %v, want ErrLoopWorkerActive", err)
+	}
+	if err := rt.Stop(context.Background(), "loop"); err != nil {
+		t.Fatalf("cleanup retry Stop returned error: %v", err)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("cleanup attempts = %d, want 2", got)
+	}
+}
+
+func TestLoopWorkerStopAllRetriesPendingFailureCleanup(t *testing.T) {
+	loopRelease := make(chan struct{})
+	cleanupAttempted := make(chan int32, 2)
+	var attempts atomic.Int32
+	worker := NewLoopWorker(
+		func(context.Context, WorkerRuntime) error {
+			<-loopRelease
+			return errors.New("loop failed")
+		},
+		WithLoopStop(func(context.Context, WorkerRuntime) error {
+			n := attempts.Add(1)
+			cleanupAttempted <- n
+			if n == 1 {
+				return errors.New("cleanup failed")
+			}
+			return nil
+		}),
+	)
+	rt := newTestRuntime(t)
+	if err := rt.Register(WorkerSpec{Name: "loop", Worker: worker}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "loop"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	close(loopRelease)
+	if got := readLoopAttempt(t, cleanupAttempted); got != 1 {
+		t.Fatalf("automatic cleanup attempt = %d, want 1", got)
+	}
+	waitForLoopState(t, rt, StateFailed)
+
+	if err := rt.StopAll(context.Background()); err != nil {
+		t.Fatalf("StopAll returned error: %v", err)
+	}
+	if got := readLoopAttempt(t, cleanupAttempted); got != 2 {
+		t.Fatalf("StopAll cleanup attempt = %d, want 2", got)
+	}
+	waitForLoopState(t, rt, StateStopped)
+}
+
 type blockingFailureObserver struct {
 	entered chan FailureEvent
 	release <-chan struct{}
@@ -724,5 +1054,37 @@ func readLoopEvent(t *testing.T, events <-chan string) string {
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("timed out waiting for loop event")
 		return ""
+	}
+}
+
+func readLoopAttempt(t *testing.T, attempts <-chan int32) int32 {
+	t.Helper()
+
+	select {
+	case attempt := <-attempts:
+		return attempt
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for loop attempt")
+		return 0
+	}
+}
+
+func waitForLoopFailureEvent(t *testing.T, observer *recordingObserver, cause error) FailureEvent {
+	t.Helper()
+
+	deadline := time.After(time.Second)
+	for {
+		for _, event := range observer.snapshot().failures {
+			if errors.Is(event.Cause, cause) {
+				return event
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("failure event for %v was not observed", cause)
+			return FailureEvent{}
+		default:
+			time.Sleep(time.Millisecond)
+		}
 	}
 }

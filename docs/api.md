@@ -110,15 +110,15 @@ Everything else in this file exists to customize that path without turning worke
 
 - `Stop(...)`
 
-  Stops one running, draining, or failed worker. Stop closes command admission but does not wait for in-flight commands or cancel their contexts; compose `Drain`, `WaitIdle`, and `Stop` when graceful command drain is required.
+  Stops one running, draining, or failed worker. Stop closes command admission for that worker only, without affecting unrelated running workers. It does not wait for in-flight commands or cancel their contexts; compose `Drain`, `WaitIdle`, and `Stop` when graceful command drain is required.
 
 - `StopAll(...)`
 
-  Stops registered workers in reverse registration order and continues after individual stop failures.
+  Closes runtime-wide command admission, stops registered workers in reverse registration order, and continues after individual stop failures.
 
 - `Shutdown(...)`
 
-  Convenience graceful shutdown path for non-HTTP callers. It drains all workers best-effort, waits for runtime idle, then stops all workers using the caller's context.
+  Convenience graceful shutdown path for non-HTTP callers. It closes runtime-wide command admission, drains all workers best-effort, waits for runtime idle, then stops all workers using the caller's context.
 
 ### Commands
 
@@ -175,14 +175,16 @@ Everything else in this file exists to customize that path without turning worke
   status, logs, telemetry, diagnostics, support tools, and tests.
 
 - `FailureCodeWorkerFailed`
+- `FailureCodeLoopCleanupFailed`
 - `FailureCodeCommandFailed`
 - `FailureCodeDeadlineExceeded`
 - `FailureCodeCanceled`
 - `FailureCodePanic`
 
   Stable public codes used by Workerkit's default failure projection. Ordinary
-  arbitrary errors receive a generic worker or command presentation; they are
-  never formatted into public status or built-in telemetry.
+  arbitrary errors receive a generic worker, loop-cleanup, or command
+  presentation; they are never formatted into public status or built-in
+  telemetry.
 
 - `CommandHandler`
 
@@ -303,7 +305,7 @@ through Opskit and Servekit rather than a Workerkit-specific read API.
 
 - `StateStopping`
 
-  Actively shutting down.
+  Actively shutting down. Aggregate runtime `StateStopping` reports that at least one worker is stopping; it is not by itself a runtime-wide command-admission cutoff.
 
 - `StateStopped`
 
@@ -471,6 +473,12 @@ Default worker options are copied into each worker when it is registered. Later 
 
   Backend-neutral runtime telemetry hook. The method set is intended to remain stable within a major version; future telemetry details should usually be added as fields on existing event structs.
 
+- `CheckExecutionObserver`
+
+  Optional `Observer` capability for Workerkit-managed Opskit check-loop
+  executions. Existing observers do not need to implement it. `StartCheck`
+  may return a context passed to the Checker or CheckGroup and its result hook.
+
 - `TransitionEvent`
 
   One worker or runtime lifecycle transition.
@@ -490,6 +498,29 @@ Default worker options are copied into each worker when it is registered. Later 
   original `Cause`. Custom observers must not publish `Cause` without explicit
   application policy.
 
+- `CheckStartEvent`
+
+  Start of one managed Checker or CheckGroup execution. Includes runtime,
+  qualified worker, bounded check kind, and start time.
+
+- `CheckObservation`
+
+  Receives the final managed check execution observation exactly once.
+
+- `CheckEndEvent`
+
+  End of one managed check execution. Includes Workerkit-measured duration,
+  bounded outcome, and whether the loop continues.
+
+- `CheckKind`
+
+  Bounded execution kind: `CheckKindChecker` or `CheckKindGroup`.
+
+- `CheckOutcome`
+
+  Bounded execution result: ready, not ready, timeout, cancellation, panic, or
+  Workerkit integration error.
+
 - `FailureEvent`
 
   One worker lifecycle, background, command, or panic failure. Command retry
@@ -508,9 +539,17 @@ Default worker options are copied into each worker when it is registered. Later 
 
   Discards command end observations.
 
+- `NopCheckObservation`
+
+  Discards check end observations.
+
 - `CommandObservationFunc`
 
   Adapts a function into `CommandObservation`.
+
+- `CheckObservationFunc`
+
+  Adapts a function into `CheckObservation`.
 
 - `MultiObserver(...)`
 
@@ -532,7 +571,9 @@ Default worker options are copied into each worker when it is registered. Later 
 
 - `LoopWorker.Stop(...)`
 
-  Cancels the managed loop and waits for it to exit.
+  Cancels the managed loop, waits for it to exit, and runs cleanup. A cleanup
+  error leaves cleanup pending so a later Stop can retry it; Start remains
+  blocked until cleanup succeeds.
 
 - `LoopFunc`
 
@@ -558,7 +599,9 @@ Default worker options are copied into each worker when it is registered. Later 
 
 - `WithLoopStop(...)`
 
-  Sets an optional cleanup hook that runs after the loop goroutine stops.
+  Sets an optional cleanup hook that runs after the loop goroutine stops. Only
+  one attempt runs at a time. Failed attempts are retryable through a later Stop,
+  and the hook should return nil only after cleanup is complete.
 
 - `WithLoopAutoReady(enabled bool)`
 
@@ -630,11 +673,13 @@ them. These constructors adapt those hooks into ordinary Workerkit workers.
 
 - `WithCheckResultObserver(...)`
 
-  Observes completed single-check results.
+  Observes completed single-check Opskit payloads, including rich result detail.
+  Core bounded execution telemetry uses `CheckExecutionObserver` instead.
 
 - `WithCheckSummaryObserver(...)`
 
-  Observes completed check-group summaries.
+  Observes completed check-group Opskit payloads, including child result detail.
+  Core bounded execution telemetry uses `CheckExecutionObserver` instead.
 
 - `ErrNilChecker`
 
@@ -924,7 +969,8 @@ registry and Servekit presentation explicitly.
 
 - `Observer`
 
-  OpenTelemetry-backed implementation of `workerkit.Observer`.
+  OpenTelemetry-backed implementation of `workerkit.Observer` and
+  `workerkit.CheckExecutionObserver`.
 
 - `New(...)`
 
@@ -946,8 +992,10 @@ registry and Servekit presentation explicitly.
 
   Appends attributes to emitted spans and metrics. Service identity should usually be configured on the OpenTelemetry resource instead.
 
-The adapter records command dispatches as spans, lifecycle/readiness/failure
-events on the current span, and counters/histograms for runtime activity. It
+The adapter records command dispatches and managed check executions as spans,
+lifecycle/readiness/failure events on the current span, and counters/histograms
+for runtime activity. Check loops record `workerkit.check.executions` and
+`workerkit.check.duration`. It
 records safe failure code/message fields and deliberately ignores private event
 causes. Dispatch ids appear on spans and span events, not metrics, to avoid
 high-cardinality metric labels.
@@ -958,7 +1006,8 @@ high-cardinality metric labels.
 
 - `Observer`
 
-  `slog`-backed implementation of `workerkit.Observer`.
+  `slog`-backed implementation of `workerkit.Observer` and
+  `workerkit.CheckExecutionObserver`.
 
 - `New(...)`
 
