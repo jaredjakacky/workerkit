@@ -11,6 +11,9 @@ const (
 	// FailureCodeWorkerFailed is the default public code for a worker lifecycle
 	// or background failure whose private cause has no explicit presentation.
 	FailureCodeWorkerFailed = "worker_failed"
+	// FailureCodeLoopCleanupFailed is the default public code for a LoopWorker
+	// cleanup attempt whose private cause has no explicit presentation.
+	FailureCodeLoopCleanupFailed = "loop_cleanup_failed"
 	// FailureCodeCommandFailed is the default public code for a command failure
 	// whose private cause has no explicit presentation.
 	FailureCodeCommandFailed = "command_failed"
@@ -27,11 +30,68 @@ var (
 		Code:    FailureCodeWorkerFailed,
 		Message: "worker operation failed",
 	}
+	loopCleanupFailure = opskit.Failure{
+		Code:    FailureCodeLoopCleanupFailed,
+		Message: "loop worker cleanup failed",
+	}
 	commandFailure = opskit.Failure{
 		Code:    FailureCodeCommandFailed,
 		Message: "command failed",
 	}
 )
+
+type loopCleanupError struct {
+	cause error
+}
+
+func newLoopCleanupError(cause error) error {
+	if cause == nil {
+		return nil
+	}
+	if _, ok := cause.(*loopCleanupError); ok {
+		return cause
+	}
+	return &loopCleanupError{cause: cause}
+}
+
+func (e *loopCleanupError) Error() string {
+	if e == nil || e.cause == nil {
+		return loopCleanupFailure.Message
+	}
+	return e.cause.Error()
+}
+
+func (e *loopCleanupError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func (e *loopCleanupError) operationalFailure() opskit.Failure {
+	if e == nil {
+		return loopCleanupFailure
+	}
+	if explicit := safeExplicitOperationalFailure(e.cause); explicit != (opskit.Failure{}) {
+		return explicit
+	}
+	return loopCleanupFailure
+}
+
+func safeExplicitOperationalFailure(err error) (failure opskit.Failure) {
+	defer func() {
+		if recover() != nil {
+			failure = opskit.Failure{}
+		}
+	}()
+	var provider operationalFailureProvider
+	if errors.As(err, &provider) {
+		if explicit := provider.operationalFailure(); explicit != (opskit.Failure{}) {
+			return explicit
+		}
+	}
+	return opskit.Failure{}
+}
 
 // WithOperationalFailure associates an explicit safe public presentation with
 // a private cause. The returned error formats only failure.Message and unwraps

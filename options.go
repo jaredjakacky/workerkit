@@ -374,7 +374,8 @@ func WithDefaultWorkerReadinessContribution(contributes bool) RuntimeOption {
 
 // WithObserver sets the runtime's transport-neutral observer hook. Nil installs
 // a no-op observer. Non-nil observers are wrapped with SafeObserver so telemetry
-// panics do not escape runtime lifecycle or command dispatch paths.
+// panics do not escape runtime lifecycle, command dispatch, or managed check
+// execution paths. CheckExecutionObserver is detected as an optional capability.
 func WithObserver(observer Observer) RuntimeOption {
 	return func(cfg *runtimeConfig) {
 		if observer == nil {

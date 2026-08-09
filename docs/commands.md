@@ -166,9 +166,10 @@ Command panics are also recorded in `LastCommandFailure` and emit a panic
 failure event. A panic from the current worker generation moves a running or
 draining worker to `failed`.
 
-Stop closes command admission but does not wait for admitted commands or cancel
-their contexts. If an admitted command returns an error or panics after Stop has
-begun or completed, Workerkit preserves the stopping/stopped lifecycle, updates
+Worker-scoped Stop closes command admission for its target but not for unrelated
+running workers. It does not wait for admitted commands or cancel their
+contexts. If an admitted command returns an error or panics after Stop has begun
+or completed, Workerkit preserves the stopping/stopped lifecycle, updates
 `LastCommandFailure`, and emits the failure event. Successful completion only
 releases the in-flight slot. A command retained from an older generation cannot
 mutate the restarted worker's status, though its failure event is still emitted.
@@ -181,11 +182,16 @@ Dispatch must pass runtime and worker checks:
 
 - target worker exists
 - command exists
-- runtime is accepting work
+- no explicit runtime-wide command-admission cutoff is active
 - worker lifecycle accepts command dispatch
 - worker is accepting work
 - runtime concurrency limit has capacity
 - worker concurrency limit has capacity
+
+`StopAll`, `Shutdown`, and `FailurePolicyFailRuntime` close runtime-wide command
+admission. Aggregate `starting`, `draining`, or `stopping` state alone does not:
+those states may describe one worker while another remains eligible for
+dispatch.
 
 Saturation errors are explicit:
 

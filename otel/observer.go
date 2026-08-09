@@ -18,6 +18,8 @@ const (
 
 	metricCommandCount         = "workerkit.command.dispatches"
 	metricCommandDuration      = "workerkit.command.duration"
+	metricCheckCount           = "workerkit.check.executions"
+	metricCheckDuration        = "workerkit.check.duration"
 	metricFailureCount         = "workerkit.failures"
 	metricReadinessChangeCount = "workerkit.readiness.changes"
 	metricLifecycleChangeCount = "workerkit.lifecycle.transitions"
@@ -26,6 +28,7 @@ const (
 	eventFailure         = "workerkit.failure"
 	eventReadinessChange = "workerkit.readiness.change"
 	spanCommandPrefix    = "workerkit.command"
+	spanCheck            = "workerkit.check"
 
 	attrRuntime         = "workerkit.runtime"
 	attrWorker          = "workerkit.worker"
@@ -34,6 +37,9 @@ const (
 	attrCommandAttempt  = "workerkit.command.attempt"
 	attrCommandAttempts = "workerkit.command.attempts"
 	attrCommandSuccess  = "workerkit.command.success"
+	attrCheckKind       = "workerkit.check.kind"
+	attrCheckOutcome    = "workerkit.check.outcome"
+	attrCheckContinues  = "workerkit.check.loop_continues"
 	attrLifecycleFrom   = "workerkit.lifecycle.from"
 	attrLifecycleTo     = "workerkit.lifecycle.to"
 	attrFailurePanic    = "workerkit.failure.panic"
@@ -75,8 +81,8 @@ func WithAttributes(attrs ...attribute.KeyValue) Option {
 	}
 }
 
-// Observer converts Workerkit runtime telemetry events into OpenTelemetry spans
-// and metrics.
+// Observer converts Workerkit runtime telemetry events, including managed check
+// executions, into OpenTelemetry spans and metrics.
 //
 // It uses global OpenTelemetry providers by default, matching Servekit's
 // default integration mode. Explicit providers can be supplied when the host
@@ -87,6 +93,8 @@ type Observer struct {
 
 	commandCount         metric.Int64Counter
 	commandDuration      metric.Float64Histogram
+	checkCount           metric.Int64Counter
+	checkDuration        metric.Float64Histogram
 	failureCount         metric.Int64Counter
 	readinessChangeCount metric.Int64Counter
 	lifecycleChangeCount metric.Int64Counter
@@ -131,6 +139,21 @@ func New(opts ...Option) (*Observer, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create command duration metric: %w", err)
+	}
+	observer.checkCount, err = meter.Int64Counter(
+		metricCheckCount,
+		metric.WithDescription("Workerkit managed check-loop execution results."),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create check count metric: %w", err)
+	}
+	observer.checkDuration, err = meter.Float64Histogram(
+		metricCheckDuration,
+		metric.WithDescription("Workerkit managed check-loop execution duration in seconds."),
+		metric.WithUnit("s"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create check duration metric: %w", err)
 	}
 	observer.failureCount, err = meter.Int64Counter(
 		metricFailureCount,
@@ -196,6 +219,85 @@ func (o *Observer) StartCommand(ctx context.Context, event workerkit.CommandStar
 		span:       span,
 		attrs:      attrs,
 		dispatchID: event.DispatchID,
+	}
+}
+
+// StartCheck implements workerkit.CheckExecutionObserver.
+func (o *Observer) StartCheck(ctx context.Context, event workerkit.CheckStartEvent) (context.Context, workerkit.CheckObservation) {
+	attrs := o.attrs(
+		event.Runtime,
+		event.Worker,
+		"",
+		attribute.String(attrCheckKind, checkKindAttribute(event.Kind)),
+	)
+
+	ctx, span := o.tracer.Start(
+		ctx,
+		spanCheck,
+		trace.WithTimestamp(event.StartedAt),
+		trace.WithAttributes(attrs...),
+	)
+	return ctx, checkObservation{
+		observer: o,
+		span:     span,
+		attrs:    attrs,
+	}
+}
+
+type checkObservation struct {
+	observer *Observer
+	span     trace.Span
+	attrs    []attribute.KeyValue
+}
+
+func (o checkObservation) End(ctx context.Context, event workerkit.CheckEndEvent) {
+	outcome := checkOutcomeAttribute(event.Outcome)
+	attrs := append(
+		append([]attribute.KeyValue{}, o.attrs...),
+		attribute.String(attrCheckOutcome, outcome),
+		attribute.Bool(attrCheckContinues, event.LoopContinues),
+	)
+
+	switch event.Outcome {
+	case workerkit.CheckOutcomeReady:
+		o.span.SetStatus(codes.Ok, "")
+	case workerkit.CheckOutcomeCanceled:
+	default:
+		message := fmt.Sprintf("check execution outcome: %s", outcome)
+		o.span.RecordError(errors.New(message), trace.WithTimestamp(event.EndedAt))
+		o.span.SetStatus(codes.Error, message)
+	}
+	o.span.SetAttributes(attrs...)
+	o.span.End(trace.WithTimestamp(event.EndedAt))
+
+	if o.observer.checkCount != nil {
+		o.observer.checkCount.Add(ctx, 1, metric.WithAttributes(attrs...))
+	}
+	if o.observer.checkDuration != nil {
+		o.observer.checkDuration.Record(ctx, event.Duration.Seconds(), metric.WithAttributes(attrs...))
+	}
+}
+
+func checkKindAttribute(kind workerkit.CheckKind) string {
+	switch kind {
+	case workerkit.CheckKindChecker, workerkit.CheckKindGroup:
+		return string(kind)
+	default:
+		return "unknown"
+	}
+}
+
+func checkOutcomeAttribute(outcome workerkit.CheckOutcome) string {
+	switch outcome {
+	case workerkit.CheckOutcomeReady,
+		workerkit.CheckOutcomeNotReady,
+		workerkit.CheckOutcomeTimeout,
+		workerkit.CheckOutcomeCanceled,
+		workerkit.CheckOutcomePanic,
+		workerkit.CheckOutcomeError:
+		return string(outcome)
+	default:
+		return "unknown"
 	}
 }
 
@@ -313,3 +415,4 @@ func (o *Observer) attrs(runtime string, worker string, command string, extra ..
 }
 
 var _ workerkit.Observer = (*Observer)(nil)
+var _ workerkit.CheckExecutionObserver = (*Observer)(nil)

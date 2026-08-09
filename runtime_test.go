@@ -37,6 +37,8 @@ type recordingObserver struct {
 
 	transitions   []TransitionEvent
 	commandStarts []CommandStartEvent
+	checkStarts   []CheckStartEvent
+	checkEnds     []CheckEndEvent
 	failures      []FailureEvent
 	commandEnds   []CommandEndEvent
 }
@@ -58,6 +60,17 @@ func (o *recordingObserver) StartCommand(ctx context.Context, event CommandStart
 	})
 }
 
+func (o *recordingObserver) StartCheck(ctx context.Context, event CheckStartEvent) (context.Context, CheckObservation) {
+	o.mu.Lock()
+	o.checkStarts = append(o.checkStarts, event)
+	o.mu.Unlock()
+	return ctx, CheckObservationFunc(func(_ context.Context, event CheckEndEvent) {
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		o.checkEnds = append(o.checkEnds, event)
+	})
+}
+
 func (o *recordingObserver) ObserveFailure(_ context.Context, event FailureEvent) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -69,6 +82,8 @@ func (o *recordingObserver) ObserveReadiness(context.Context, ReadinessEvent) {}
 type recordingObserverSnapshot struct {
 	transitions   []TransitionEvent
 	commandStarts []CommandStartEvent
+	checkStarts   []CheckStartEvent
+	checkEnds     []CheckEndEvent
 	failures      []FailureEvent
 	commandEnds   []CommandEndEvent
 }
@@ -79,9 +94,30 @@ func (o *recordingObserver) snapshot() recordingObserverSnapshot {
 	return recordingObserverSnapshot{
 		transitions:   append([]TransitionEvent(nil), o.transitions...),
 		commandStarts: append([]CommandStartEvent(nil), o.commandStarts...),
+		checkStarts:   append([]CheckStartEvent(nil), o.checkStarts...),
+		checkEnds:     append([]CheckEndEvent(nil), o.checkEnds...),
 		failures:      append([]FailureEvent(nil), o.failures...),
 		commandEnds:   append([]CommandEndEvent(nil), o.commandEnds...),
 	}
+}
+
+type blockingTransitionObserver struct {
+	NopObserver
+
+	worker  string
+	entered chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (o *blockingTransitionObserver) ObserveTransition(_ context.Context, event TransitionEvent) {
+	if event.Worker != o.worker || event.From != StateRunning || event.To != StateDraining {
+		return
+	}
+	o.once.Do(func() {
+		close(o.entered)
+		<-o.release
+	})
 }
 
 const testNoSignalTimeout = 20 * time.Millisecond
@@ -919,6 +955,128 @@ func TestDispatchRemainsConcurrentWithLifecycleOperation(t *testing.T) {
 	})
 }
 
+func TestStopOneWorkerDoesNotCloseAdmissionForOtherWorkers(t *testing.T) {
+	stopEntered := make(chan struct{})
+	stopRelease := make(chan struct{})
+	var releaseStop sync.Once
+	allowStop := func() { releaseStop.Do(func() { close(stopRelease) }) }
+	defer allowStop()
+
+	observer := &recordingObserver{}
+	rt := newTestRuntime(t, WithObserver(observer))
+	if err := rt.Register(
+		WorkerSpec{
+			Name: "stopping",
+			Worker: testWorker{stop: func(context.Context) error {
+				close(stopEntered)
+				<-stopRelease
+				return nil
+			}},
+		},
+		WithCommand("ping", CommandHandlerFunc(func(context.Context, CommandRequest) (CommandResult, error) {
+			return CommandResult{Message: "stopping"}, nil
+		})),
+	); err != nil {
+		t.Fatalf("Register stopping returned error: %v", err)
+	}
+	if err := rt.Register(
+		WorkerSpec{Name: "running", Worker: testWorker{}},
+		WithCommand("ping", CommandHandlerFunc(func(context.Context, CommandRequest) (CommandResult, error) {
+			return CommandResult{Message: "pong"}, nil
+		})),
+	); err != nil {
+		t.Fatalf("Register running returned error: %v", err)
+	}
+	if err := rt.StartAll(context.Background()); err != nil {
+		t.Fatalf("StartAll returned error: %v", err)
+	}
+
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- rt.Stop(context.Background(), "stopping")
+	}()
+	<-stopEntered
+
+	if status := rt.RuntimeStatus(); status.State != StateStopping {
+		t.Fatalf("runtime state during Stop = %s, want %s", status.State, StateStopping)
+	}
+	stopping := requireWorker(t, rt, "stopping")
+	if stopping.Status.State != StateStopping || stopping.Status.AcceptingWork {
+		t.Fatalf("stopping worker state/accepting = %s/%t, want stopping/false", stopping.Status.State, stopping.Status.AcceptingWork)
+	}
+	running := requireWorker(t, rt, "running")
+	if running.Status.State != StateRunning || !running.Status.AcceptingWork {
+		t.Fatalf("running worker state/accepting = %s/%t, want running/true", running.Status.State, running.Status.AcceptingWork)
+	}
+
+	if _, err := rt.Dispatch(context.Background(), CommandRequest{Worker: "stopping", Name: "ping"}); !errors.Is(err, ErrInvalidWorkerState) {
+		t.Fatalf("stopping worker Dispatch error = %v, want ErrInvalidWorkerState", err)
+	}
+	result, err := rt.Dispatch(context.Background(), CommandRequest{Worker: "running", Name: "ping"})
+	if err != nil {
+		t.Fatalf("running worker Dispatch returned error: %v", err)
+	}
+	if result.Message != "pong" {
+		t.Fatalf("running worker Dispatch message = %q, want pong", result.Message)
+	}
+
+	events := observer.snapshot()
+	var observedSuccess bool
+	for _, event := range events.commandEnds {
+		if event.Worker == "test-runtime/running" && event.Command == "ping" && event.Success && event.Attempts == 1 {
+			observedSuccess = true
+			break
+		}
+	}
+	if !observedSuccess {
+		t.Fatalf("command end events = %#v, want successful running-worker observation", events.commandEnds)
+	}
+
+	allowStop()
+	if err := <-stopDone; err != nil {
+		t.Fatalf("Stop returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = rt.Stop(context.Background(), "running")
+	})
+}
+
+func TestDrainOneWorkerDoesNotCloseAdmissionForOtherWorkers(t *testing.T) {
+	rt := newTestRuntime(t)
+	if err := rt.Register(WorkerSpec{Name: "draining", Worker: testWorker{}}); err != nil {
+		t.Fatalf("Register draining returned error: %v", err)
+	}
+	if err := rt.Register(
+		WorkerSpec{Name: "running", Worker: testWorker{}},
+		WithCommand("ping", CommandHandlerFunc(func(context.Context, CommandRequest) (CommandResult, error) {
+			return CommandResult{Message: "pong"}, nil
+		})),
+	); err != nil {
+		t.Fatalf("Register running returned error: %v", err)
+	}
+	if err := rt.StartAll(context.Background()); err != nil {
+		t.Fatalf("StartAll returned error: %v", err)
+	}
+	if err := rt.Drain(context.Background(), "draining"); err != nil {
+		t.Fatalf("Drain returned error: %v", err)
+	}
+
+	if status := rt.RuntimeStatus(); status.State != StateDraining {
+		t.Fatalf("runtime state after Drain = %s, want %s", status.State, StateDraining)
+	}
+	result, err := rt.Dispatch(context.Background(), CommandRequest{Worker: "running", Name: "ping"})
+	if err != nil {
+		t.Fatalf("running worker Dispatch returned error: %v", err)
+	}
+	if result.Message != "pong" {
+		t.Fatalf("running worker Dispatch message = %q, want pong", result.Message)
+	}
+
+	t.Cleanup(func() {
+		_ = rt.StopAll(context.Background())
+	})
+}
+
 func TestDrainAllBestEffortWaitsForConcurrentStart(t *testing.T) {
 	startEntered := make(chan struct{})
 	releaseStart := make(chan struct{})
@@ -1008,6 +1166,69 @@ func TestStopAllStopsInReverseOrderAndReturnsJoinedErrors(t *testing.T) {
 	}
 }
 
+func TestStopAllClosesRuntimeAdmissionBeforeFirstWorkerStops(t *testing.T) {
+	stopEntered := make(chan struct{})
+	stopRelease := make(chan struct{})
+	var releaseStop sync.Once
+	allowStop := func() { releaseStop.Do(func() { close(stopRelease) }) }
+	defer allowStop()
+
+	rt := newTestRuntime(t)
+	if err := rt.Register(
+		WorkerSpec{Name: "remaining", Worker: testWorker{}},
+		WithCommand("ping", CommandHandlerFunc(func(context.Context, CommandRequest) (CommandResult, error) {
+			return CommandResult{Message: "pong"}, nil
+		})),
+	); err != nil {
+		t.Fatalf("Register remaining returned error: %v", err)
+	}
+	if err := rt.Register(WorkerSpec{
+		Name: "first-to-stop",
+		Worker: testWorker{stop: func(context.Context) error {
+			close(stopEntered)
+			<-stopRelease
+			return nil
+		}},
+	}); err != nil {
+		t.Fatalf("Register first-to-stop returned error: %v", err)
+	}
+	if err := rt.StartAll(context.Background()); err != nil {
+		t.Fatalf("StartAll returned error: %v", err)
+	}
+
+	stopAllDone := make(chan error, 1)
+	go func() {
+		stopAllDone <- rt.StopAll(context.Background())
+	}()
+	<-stopEntered
+
+	remaining := requireWorker(t, rt, "remaining")
+	if remaining.Status.State != StateRunning || !remaining.Status.AcceptingWork {
+		t.Fatalf("remaining worker state/accepting = %s/%t, want running/true", remaining.Status.State, remaining.Status.AcceptingWork)
+	}
+	if _, err := rt.Dispatch(context.Background(), CommandRequest{Worker: "remaining", Name: "ping"}); !errors.Is(err, ErrRuntimeNotAcceptingWork) {
+		t.Fatalf("Dispatch during StopAll error = %v, want ErrRuntimeNotAcceptingWork", err)
+	}
+
+	allowStop()
+	if err := <-stopAllDone; err != nil {
+		t.Fatalf("StopAll returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "remaining"); err != nil {
+		t.Fatalf("restart remaining returned error: %v", err)
+	}
+	result, err := rt.Dispatch(context.Background(), CommandRequest{Worker: "remaining", Name: "ping"})
+	if err != nil {
+		t.Fatalf("Dispatch after restart returned error: %v", err)
+	}
+	if result.Message != "pong" {
+		t.Fatalf("Dispatch after restart message = %q, want pong", result.Message)
+	}
+	t.Cleanup(func() {
+		_ = rt.Stop(context.Background(), "remaining")
+	})
+}
+
 func TestShutdownDrainsWaitsForInFlightCommandsAndStopsInReverseOrder(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
@@ -1076,6 +1297,58 @@ func TestShutdownDrainsWaitsForInFlightCommandsAndStopsInReverseOrder(t *testing
 	}
 	if got := strings.Join(stops, ","); got != "second,first" {
 		t.Fatalf("stop order = %q, want second,first", got)
+	}
+}
+
+func TestShutdownClosesRuntimeAdmissionBeforeSequentialDrainCompletes(t *testing.T) {
+	drainEntered := make(chan struct{})
+	drainRelease := make(chan struct{})
+	var releaseDrain sync.Once
+	allowDrain := func() { releaseDrain.Do(func() { close(drainRelease) }) }
+	defer allowDrain()
+
+	observer := &blockingTransitionObserver{
+		worker:  "test-runtime/first",
+		entered: drainEntered,
+		release: drainRelease,
+	}
+	rt := newTestRuntime(t, WithObserver(observer))
+	if err := rt.Register(WorkerSpec{Name: "first", Worker: testWorker{}}); err != nil {
+		t.Fatalf("Register first returned error: %v", err)
+	}
+	if err := rt.Register(
+		WorkerSpec{Name: "second", Worker: testWorker{}},
+		WithCommand("ping", CommandHandlerFunc(func(context.Context, CommandRequest) (CommandResult, error) {
+			return CommandResult{Message: "pong"}, nil
+		})),
+	); err != nil {
+		t.Fatalf("Register second returned error: %v", err)
+	}
+	if err := rt.StartAll(context.Background()); err != nil {
+		t.Fatalf("StartAll returned error: %v", err)
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- rt.Shutdown(context.Background())
+	}()
+	<-drainEntered
+
+	first := requireWorker(t, rt, "first")
+	if first.Status.State != StateDraining || first.Status.AcceptingWork {
+		t.Fatalf("first worker state/accepting = %s/%t, want draining/false", first.Status.State, first.Status.AcceptingWork)
+	}
+	second := requireWorker(t, rt, "second")
+	if second.Status.State != StateRunning || !second.Status.AcceptingWork {
+		t.Fatalf("second worker state/accepting = %s/%t, want running/true", second.Status.State, second.Status.AcceptingWork)
+	}
+	if _, err := rt.Dispatch(context.Background(), CommandRequest{Worker: "second", Name: "ping"}); !errors.Is(err, ErrRuntimeNotAcceptingWork) {
+		t.Fatalf("Dispatch during Shutdown error = %v, want ErrRuntimeNotAcceptingWork", err)
+	}
+
+	allowDrain()
+	if err := <-shutdownDone; err != nil {
+		t.Fatalf("Shutdown returned error: %v", err)
 	}
 }
 
@@ -1317,6 +1590,52 @@ func TestDispatchAdmissionErrors(t *testing.T) {
 	if !errors.Is(err, ErrRuntimeNotAcceptingWork) {
 		t.Fatalf("stopped runtime Dispatch error = %v, want ErrRuntimeNotAcceptingWork", err)
 	}
+}
+
+func TestFailRuntimePolicyClosesAdmissionForOtherWorkers(t *testing.T) {
+	var failingRuntime WorkerRuntime
+	rt := newTestRuntime(t)
+	if err := rt.Register(
+		WorkerSpec{Name: "healthy", Worker: testWorker{}},
+		WithCommand("ping", CommandHandlerFunc(func(context.Context, CommandRequest) (CommandResult, error) {
+			return CommandResult{Message: "pong"}, nil
+		})),
+	); err != nil {
+		t.Fatalf("Register healthy returned error: %v", err)
+	}
+	if err := rt.Register(
+		WorkerSpec{
+			Name: "failing",
+			Worker: testWorker{start: func(ctx context.Context) error {
+				var ok bool
+				failingRuntime, ok = WorkerRuntimeFromContext(ctx)
+				if !ok {
+					return errors.New("missing WorkerRuntime")
+				}
+				return nil
+			}},
+		},
+		WithWorkerFailurePolicy(FailurePolicyFailRuntime),
+	); err != nil {
+		t.Fatalf("Register failing returned error: %v", err)
+	}
+	if err := rt.StartAll(context.Background()); err != nil {
+		t.Fatalf("StartAll returned error: %v", err)
+	}
+	if err := failingRuntime.ReportFailure(errors.New("background failed")); err != nil {
+		t.Fatalf("ReportFailure returned error: %v", err)
+	}
+
+	if status := rt.RuntimeStatus(); status.State != StateFailed {
+		t.Fatalf("runtime state after fail-runtime failure = %s, want %s", status.State, StateFailed)
+	}
+	if _, err := rt.Dispatch(context.Background(), CommandRequest{Worker: "healthy", Name: "ping"}); !errors.Is(err, ErrRuntimeNotAcceptingWork) {
+		t.Fatalf("healthy worker Dispatch error = %v, want ErrRuntimeNotAcceptingWork", err)
+	}
+
+	t.Cleanup(func() {
+		_ = rt.StopAll(context.Background())
+	})
 }
 
 func TestDispatchSetsRequestedAtWhenZeroAndPreservesProvidedValue(t *testing.T) {

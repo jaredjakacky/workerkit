@@ -44,9 +44,10 @@
 // timeout is explicitly disabled. Worker code must observe ctx.Done() for that
 // deadline to take effect.
 //
-// Worker and runtime stop routes close command admission but do not wait for or
-// cancel commands that were already admitted. For graceful command completion,
-// drain through the lifecycle route, inspect the runtime through Servekit's
-// generic Opskit component route until InFlight is zero, then call the
-// corresponding stop route.
+// A worker stop route closes command admission only for its target. The runtime
+// stop route establishes a runtime-wide command-admission cutoff. Neither waits
+// for or cancels commands that were already admitted. For graceful command
+// completion, drain through the lifecycle route, inspect the runtime through
+// Servekit's generic Opskit component route until InFlight is zero, then call
+// the corresponding stop route.
 package opshttp

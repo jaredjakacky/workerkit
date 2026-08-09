@@ -74,10 +74,13 @@ Workerkit owns that active execution:
 - `CommandFromOpskit` turns one descriptor and `opskit.CommandHandler` into a normal Workerkit command spec.
 
 The check constructors preserve Workerkit lifecycle, cancellation, cooperative
-timeouts, jitter, panic recovery, readiness, and failure reporting. The command
-adapter preserves Workerkit dispatch admission, retry, concurrency, timeout,
-panic, observation, and lifecycle behavior. Domain kits therefore implement
-Opskit contracts instead of maintaining pairwise Workerkit adapters.
+timeouts, jitter, panic recovery, readiness, failure reporting, and bounded
+check-execution observation. Observers implementing `CheckExecutionObserver`
+receive iteration kind, duration, outcome, and continuation policy; result and
+summary callbacks retain rich Opskit detail. The command adapter preserves
+Workerkit dispatch admission, retry, concurrency, timeout, panic, observation,
+and lifecycle behavior. Domain kits therefore implement Opskit contracts
+instead of maintaining pairwise Workerkit adapters.
 
 A checked component remains responsible for caching and exposing its component
 status. Decide explicitly how readiness should be represented when both that

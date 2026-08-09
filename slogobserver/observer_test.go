@@ -177,6 +177,35 @@ func TestCommandEndLogsError(t *testing.T) {
 	requireRecordExcludes(t, record, secret)
 }
 
+func TestStartCheckLogsBoundedCompletion(t *testing.T) {
+	t.Parallel()
+
+	handler := &captureHandler{}
+	observer := New(slog.New(handler), WithLevel(slog.LevelDebug))
+	ctx, observation := observer.StartCheck(context.Background(), workerkit.CheckStartEvent{
+		Runtime: "runtime",
+		Worker:  "runtime/checks",
+		Kind:    workerkit.CheckKindGroup,
+	})
+	observation.End(ctx, workerkit.CheckEndEvent{
+		Outcome:       workerkit.CheckOutcomeTimeout,
+		LoopContinues: true,
+		Duration:      25 * time.Millisecond,
+	})
+
+	if got := handler.recordCount(); got != 1 {
+		t.Fatalf("record count = %d, want one completion record", got)
+	}
+	record := handler.lastRecord(t)
+	requireRecord(t, record, slog.LevelDebug, "workerkit check execution completed")
+	requireStringAttr(t, record, "runtime", "runtime")
+	requireStringAttr(t, record, "worker", "runtime/checks")
+	requireStringAttr(t, record, "check_kind", string(workerkit.CheckKindGroup))
+	requireStringAttr(t, record, "check_outcome", string(workerkit.CheckOutcomeTimeout))
+	requireBoolAttr(t, record, "loop_continues", true)
+	requireDurationAttr(t, record, "duration", 25*time.Millisecond)
+}
+
 func TestObserveFailureLogsAtErrorLevel(t *testing.T) {
 	t.Parallel()
 
@@ -243,15 +272,17 @@ func TestObserverSupportsConcurrentUse(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			ctx, observation := observer.StartCommand(context.Background(), workerkit.CommandStartEvent{})
+			checkCtx, checkObservation := observer.StartCheck(ctx, workerkit.CheckStartEvent{})
 			observer.ObserveTransition(ctx, workerkit.TransitionEvent{})
 			observer.ObserveFailure(ctx, workerkit.FailureEvent{})
 			observer.ObserveReadiness(ctx, workerkit.ReadinessEvent{})
+			checkObservation.End(checkCtx, workerkit.CheckEndEvent{})
 			observation.End(ctx, workerkit.CommandEndEvent{})
 		}()
 	}
 	wg.Wait()
 
-	if got, want := handler.recordCount(), calls*4; got != want {
+	if got, want := handler.recordCount(), calls*5; got != want {
 		t.Fatalf("record count = %d, want %d", got, want)
 	}
 }

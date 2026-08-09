@@ -78,6 +78,12 @@ type Runtime struct {
 
 	commandDispatchSeq atomic.Uint64
 	status             RuntimeStatus
+
+	// commandAdmissionClosed is an explicit runtime-wide command cutoff used by
+	// bulk shutdown operations. Aggregate lifecycle state remains descriptive:
+	// one worker entering StateStopping does not close admission for unrelated
+	// running workers.
+	commandAdmissionClosed bool
 }
 
 // New constructs a runtime for one workerkit service boundary.
@@ -284,6 +290,21 @@ func (r *Runtime) runLifecycle(ctx context.Context, operation func() error) erro
 	return operation()
 }
 
+func (r *Runtime) runWithCommandAdmissionClosed(operation func() error) error {
+	r.mu.Lock()
+	wasClosed := r.commandAdmissionClosed
+	r.commandAdmissionClosed = true
+	r.mu.Unlock()
+
+	defer func() {
+		r.mu.Lock()
+		r.commandAdmissionClosed = wasClosed
+		r.mu.Unlock()
+	}()
+
+	return operation()
+}
+
 // Start brings one registered worker into service.
 //
 // The worker must currently be registered, stopped, or failed. Start calls
@@ -335,9 +356,16 @@ func (r *Runtime) start(ctx context.Context, name string) (err error) {
 		attemptCtx = withWorkerRuntime(attemptCtx, r.workerRuntimeHandle(attemptCtx, name, generation))
 		return worker.Start(attemptCtx)
 	}, func(opErr error, _ int) {
+		if _, ok := opErr.(*loopCleanupError); ok {
+			return
+		}
 		r.recordWorkerFailureStatus(name, generation, opErr)
 	})
 	if err != nil {
+		if _, ok := err.(*loopCleanupError); ok {
+			r.failLoopCleanup(ctx, name, generation, err)
+			return err
+		}
 		r.failWorker(ctx, name, generation, err, false)
 		return err
 	}
@@ -348,15 +376,18 @@ func (r *Runtime) start(ctx context.Context, name string) (err error) {
 // Stop takes one running, draining, or failed worker out of service.
 //
 // Stop immediately moves the worker to stopping, marks it unready, and stops
-// accepting new work. It calls Worker.Stop with a WorkerRuntime handle in
-// context and applies the worker's stop timeout, panic, and failure policies.
+// accepting new work. This worker-scoped operation does not close command
+// admission for unrelated running workers. It calls Worker.Stop with a
+// WorkerRuntime handle in context and applies the worker's stop timeout, panic,
+// and failure policies.
 // Stop may be called after StateFailed so worker-owned resources can be cleaned
 // up after failure reporting.
 //
 // The stop timeout is a cooperative context deadline. Worker.Stop must observe
 // ctx.Done() and return. Workerkit cannot force resource cleanup if Stop blocks.
 // A timed-out LoopWorker stop remains active internally; retry Stop to join the
-// same loop and finish cleanup before restarting it.
+// same loop and finish cleanup before restarting it. A LoopWorker cleanup hook
+// error also leaves cleanup pending, and a later Stop retries the hook.
 //
 // Stop does not wait for in-flight commands or cancel their contexts. A stopped
 // worker may therefore temporarily report a positive InFlight count. Worker.Stop
@@ -397,6 +428,10 @@ func (r *Runtime) stop(ctx context.Context, name string) (err error) {
 
 	err = worker.Stop(attemptCtx)
 	if err != nil {
+		if _, ok := err.(*loopCleanupError); ok {
+			r.failLoopCleanup(ctx, name, generation, err)
+			return err
+		}
 		r.recordWorkerFailureStatus(name, generation, err)
 		r.failWorker(ctx, name, generation, err, false)
 		return err
@@ -524,9 +559,12 @@ func (r *Runtime) drainAllBestEffort(ctx context.Context) error {
 //
 // StopAll stops running, draining, and failed workers, skips workers that are
 // already inactive, and continues after individual stop failures. If any worker
-// fails to stop, StopAll returns the combined error.
+// fails to stop, StopAll returns the combined error. It closes runtime-wide
+// command admission before stopping the first worker.
 func (r *Runtime) StopAll(ctx context.Context) error {
-	return r.runLifecycle(ctx, func() error { return r.stopAll(ctx) })
+	return r.runLifecycle(ctx, func() error {
+		return r.runWithCommandAdmissionClosed(func() error { return r.stopAll(ctx) })
+	})
 }
 
 func (r *Runtime) stopAll(ctx context.Context) error {
@@ -553,9 +591,12 @@ func (r *Runtime) stopAll(ctx context.Context) error {
 // Shutdown drains active workers best-effort, waits for in-flight Workerkit
 // commands to finish, then stops workers in reverse registration order. It uses
 // the caller's context directly for the entire sequence. Callers that need a
-// shutdown budget should pass a context with a deadline.
+// shutdown budget should pass a context with a deadline. Shutdown closes
+// runtime-wide command admission before beginning the drain sequence.
 func (r *Runtime) Shutdown(ctx context.Context) error {
-	return r.runLifecycle(ctx, func() error { return r.shutdown(ctx) })
+	return r.runLifecycle(ctx, func() error {
+		return r.runWithCommandAdmissionClosed(func() error { return r.shutdown(ctx) })
+	})
 }
 
 func (r *Runtime) shutdown(ctx context.Context) error {
@@ -1222,6 +1263,53 @@ func (r *Runtime) failWorker(ctx context.Context, name string, generation uint64
 	r.observeRuntimeChanges(ctx, obs.before, obs.after)
 }
 
+func (r *Runtime) failLoopCleanup(ctx context.Context, name string, generation uint64, err error) {
+	failure := operationalFailure(err, loopCleanupFailure)
+	r.mu.Lock()
+
+	state := r.workerStates[name]
+	now := time.Now()
+	if state.generation != generation {
+		r.mu.Unlock()
+		return
+	}
+	before := state
+	state.lastTransition = &LifecycleTransition{
+		From: state.lifecycle,
+		To:   StateFailed,
+		At:   now,
+	}
+	state.lifecycle = StateFailed
+	state.ready = false
+	state.acceptingWork = false
+	state.readySetDuringStart = false
+	state.acceptingWorkSetDuringStart = false
+	state.failureReportedDuringStart = false
+	if state.lastFailure == nil {
+		state.lastFailure = &FailureInfo{
+			Code:    failure.Code,
+			Message: failure.Message,
+			At:      now,
+		}
+	}
+	obs := r.commitWorkerStateLocked(name, before, state, now)
+	r.mu.Unlock()
+
+	if obs.from != obs.to {
+		r.observeTransition(ctx, obs.worker, obs.from, obs.to, obs.at)
+	}
+	r.observeReadinessChange(ctx, obs.worker, obs.beforeReady, obs.afterReady, obs.at)
+	r.observeFailure(ctx, name, "", err, false, now, "", 0)
+	r.observeRuntimeChanges(ctx, obs.before, obs.after)
+}
+
+func (r *Runtime) observeLoopCleanupFailure(ctx context.Context, name string, err error) {
+	if err == nil {
+		return
+	}
+	r.observeFailure(ctx, name, "", newLoopCleanupError(err), false, time.Now(), "", 0)
+}
+
 func (r *Runtime) reportWorkerFailure(ctx context.Context, name string, generation uint64, err error) error {
 	if err == nil {
 		return nil
@@ -1485,11 +1573,16 @@ func (r *Runtime) admitCommand(name string) (uint64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Runtime aggregate draining is status, not a global command admission gate.
+	if r.commandAdmissionClosed {
+		return 0, fmt.Errorf("%w: runtime %q command admission is closed", ErrRuntimeNotAcceptingWork, r.identity.Name)
+	}
+
+	// Aggregate transitional state is status, not a global admission gate.
 	// Worker-level lifecycle and accepting-work state decide whether a command
-	// can target a specific worker.
+	// can target a specific worker unless an explicit runtime-wide cutoff above
+	// is active.
 	switch r.status.State {
-	case StateFailed, StateStopping, StateStopped, StateRegistered:
+	case StateFailed, StateStopped, StateRegistered:
 		return 0, fmt.Errorf("%w: runtime %q is in state %q", ErrRuntimeNotAcceptingWork, r.identity.Name, r.status.State)
 	}
 
@@ -1736,6 +1829,40 @@ func (r *Runtime) observeTransition(ctx context.Context, worker string, from Lif
 func (r *Runtime) nextCommandDispatchID() string {
 	seq := r.commandDispatchSeq.Add(1)
 	return fmt.Sprintf("%s-%d", r.identity.Name, seq)
+}
+
+func (r *Runtime) startCheckObservation(ctx context.Context, worker string, kind CheckKind, startedAt time.Time) (context.Context, CheckObservation) {
+	observer, ok := r.observer().(CheckExecutionObserver)
+	if !ok {
+		return ctx, NopCheckObservation{}
+	}
+	observedCtx, observation := observer.StartCheck(ctx, CheckStartEvent{
+		Runtime:   r.identity.Name,
+		Worker:    worker,
+		Kind:      kind,
+		StartedAt: startedAt,
+	})
+	if observedCtx == nil {
+		observedCtx = ctx
+	}
+	if observation == nil {
+		observation = NopCheckObservation{}
+	}
+	return observedCtx, observation
+}
+
+func (r *Runtime) endCheckObservation(ctx context.Context, observation CheckObservation, worker string, kind CheckKind, outcome CheckOutcome, loopContinues bool, startedAt time.Time) {
+	endedAt := time.Now()
+	observation.End(ctx, CheckEndEvent{
+		Runtime:       r.identity.Name,
+		Worker:        worker,
+		Kind:          kind,
+		Outcome:       outcome,
+		LoopContinues: loopContinues,
+		StartedAt:     startedAt,
+		EndedAt:       endedAt,
+		Duration:      endedAt.Sub(startedAt),
+	})
 }
 
 func (r *Runtime) startCommandObservation(ctx context.Context, worker string, command string, dispatchID string, startedAt time.Time) (context.Context, CommandObservation) {

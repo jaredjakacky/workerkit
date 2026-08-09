@@ -175,13 +175,17 @@ func TestCheckLoopPassesTimeoutContext(t *testing.T) {
 func TestCheckLoopStopCancelsInFlightCheck(t *testing.T) {
 	started := make(chan struct{})
 	done := make(chan error, 1)
+	observer := &checkExecutionRecorder{
+		starts: make(chan CheckStartEvent, 1),
+		ends:   make(chan CheckEndEvent, 1),
+	}
 	checker := opskit.CheckFunc(func(ctx context.Context) opskit.CheckResult {
 		close(started)
 		<-ctx.Done()
 		done <- ctx.Err()
 		return opskit.NotReadyCheck("stopped", 0)
 	})
-	rt := newTestRuntime(t)
+	rt := newTestRuntime(t, WithObserver(observer))
 	if err := rt.Register(WorkerSpec{Name: "checks", Worker: NewCheckLoop(checker, WithCheckInterval(time.Hour))}); err != nil {
 		t.Fatalf("Register returned error: %v", err)
 	}
@@ -203,6 +207,10 @@ func TestCheckLoopStopCancelsInFlightCheck(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for check cancellation")
+	}
+	end := readCheckEndEvent(t, observer.ends)
+	if end.Outcome != CheckOutcomeCanceled || end.LoopContinues {
+		t.Fatalf("CheckEndEvent = %#v, want canceled terminal execution", end)
 	}
 }
 
@@ -388,6 +396,168 @@ func TestCheckGroupLoopExecutesGroupAndObservesSummary(t *testing.T) {
 		t.Fatalf("CheckAll calls = %d, want 1", got)
 	}
 	waitForCheckWorkerReady(t, rt, true)
+}
+
+func TestCheckLoopExecutionObservationIncludesIdentityKindAndDerivedContext(t *testing.T) {
+	tests := []struct {
+		name   string
+		kind   CheckKind
+		worker func(chan<- bool, chan<- bool) Worker
+	}{
+		{
+			name: "checker",
+			kind: CheckKindChecker,
+			worker: func(executionContext chan<- bool, resultContext chan<- bool) Worker {
+				return NewCheckLoop(
+					opskit.CheckFunc(func(ctx context.Context) opskit.CheckResult {
+						executionContext <- ctx.Value(checkExecutionContextKey{}) == "observed"
+						return opskit.ReadyCheck("ready", 0)
+					}),
+					WithCheckInterval(time.Hour),
+					WithCheckResultObserver(func(ctx context.Context, _ opskit.CheckResult) {
+						resultContext <- ctx.Value(checkExecutionContextKey{}) == "observed"
+					}),
+				)
+			},
+		},
+		{
+			name: "check group",
+			kind: CheckKindGroup,
+			worker: func(executionContext chan<- bool, resultContext chan<- bool) Worker {
+				return NewCheckGroupLoop(
+					opskit.CheckGroupFunc(func(ctx context.Context) opskit.CheckSummary {
+						executionContext <- ctx.Value(checkExecutionContextKey{}) == "observed"
+						return opskit.SummarizeChecks("", time.Now(), []opskit.NamedCheck{
+							{Name: "dependency", Result: opskit.ReadyCheck("ready", 0)},
+						})
+					}),
+					WithCheckInterval(time.Hour),
+					WithCheckSummaryObserver(func(ctx context.Context, _ opskit.CheckSummary) {
+						resultContext <- ctx.Value(checkExecutionContextKey{}) == "observed"
+					}),
+				)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			executionContext := make(chan bool, 1)
+			resultContext := make(chan bool, 1)
+			observer := &checkExecutionRecorder{
+				starts: make(chan CheckStartEvent, 1),
+				ends:   make(chan CheckEndEvent, 1),
+			}
+			rt, err := New(Identity{Name: "test-runtime"}, WithObserver(observer))
+			if err != nil {
+				t.Fatalf("New returned error: %v", err)
+			}
+			if err := rt.Register(WorkerSpec{Name: "checks", Worker: tt.worker(executionContext, resultContext)}); err != nil {
+				t.Fatalf("Register returned error: %v", err)
+			}
+			if err := rt.Start(context.Background(), "checks"); err != nil {
+				t.Fatalf("Start returned error: %v", err)
+			}
+			t.Cleanup(func() { _ = rt.Stop(context.Background(), "checks") })
+
+			start := readCheckStartEvent(t, observer.starts)
+			end := readCheckEndEvent(t, observer.ends)
+			if start.Runtime != "test-runtime" || start.Worker != "test-runtime/checks" || start.Kind != tt.kind {
+				t.Fatalf("CheckStartEvent = %#v, want runtime and worker identity with kind %s", start, tt.kind)
+			}
+			if end.Runtime != start.Runtime || end.Worker != start.Worker || end.Kind != tt.kind || end.Outcome != CheckOutcomeReady || !end.LoopContinues {
+				t.Fatalf("CheckEndEvent = %#v, want matching ready continuing execution", end)
+			}
+			if !readCheckContextObserved(t, executionContext) || !readCheckContextObserved(t, resultContext) {
+				t.Fatal("derived check observation context did not reach execution and result callback")
+			}
+		})
+	}
+}
+
+func TestCheckLoopExecutionObserverPanicsDoNotStopLoop(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		observer Observer
+	}{
+		{name: "start", observer: panicObserver{panicCheckStart: true}},
+		{name: "end", observer: panicObserver{panicCheckEnd: true}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := make(chan struct{}, 2)
+			worker := NewCheckLoop(
+				opskit.CheckFunc(func(context.Context) opskit.CheckResult {
+					calls <- struct{}{}
+					return opskit.ReadyCheck("ready", 0)
+				}),
+				WithCheckInterval(time.Millisecond),
+			)
+			rt := newTestRuntime(t, WithObserver(tt.observer))
+			if err := rt.Register(WorkerSpec{Name: "checks", Worker: worker}); err != nil {
+				t.Fatalf("Register returned error: %v", err)
+			}
+			if err := rt.Start(context.Background(), "checks"); err != nil {
+				t.Fatalf("Start returned error: %v", err)
+			}
+			t.Cleanup(func() { _ = rt.Stop(context.Background(), "checks") })
+
+			readCheckLoopCall(t, calls)
+			readCheckLoopCall(t, calls)
+			snapshot, ok := rt.Worker("checks")
+			if !ok || snapshot.Status.State != StateRunning {
+				t.Fatalf("worker snapshot = %#v, want running after observer panic", snapshot)
+			}
+		})
+	}
+}
+
+type checkExecutionContextKey struct{}
+
+type checkExecutionRecorder struct {
+	NopObserver
+	starts chan CheckStartEvent
+	ends   chan CheckEndEvent
+}
+
+func (o *checkExecutionRecorder) StartCheck(ctx context.Context, event CheckStartEvent) (context.Context, CheckObservation) {
+	o.starts <- event
+	ctx = context.WithValue(ctx, checkExecutionContextKey{}, "observed")
+	return ctx, CheckObservationFunc(func(_ context.Context, event CheckEndEvent) {
+		o.ends <- event
+	})
+}
+
+func readCheckStartEvent(t *testing.T, events <-chan CheckStartEvent) CheckStartEvent {
+	t.Helper()
+	select {
+	case event := <-events:
+		return event
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for CheckStartEvent")
+		return CheckStartEvent{}
+	}
+}
+
+func readCheckEndEvent(t *testing.T, events <-chan CheckEndEvent) CheckEndEvent {
+	t.Helper()
+	select {
+	case event := <-events:
+		return event
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for CheckEndEvent")
+		return CheckEndEvent{}
+	}
+}
+
+func readCheckContextObserved(t *testing.T, observed <-chan bool) bool {
+	t.Helper()
+	select {
+	case value := <-observed:
+		return value
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for derived check context")
+		return false
+	}
 }
 
 func readCheckLoopCall(t *testing.T, calls <-chan struct{}) {

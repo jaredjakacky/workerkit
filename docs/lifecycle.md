@@ -29,7 +29,7 @@ the caller's context deadline.
 
 Status reads, readiness updates, failure reporting, idle waits, and command
 dispatch remain concurrent. Command admission is still determined from the
-worker and runtime state at dispatch time.
+target worker state and any explicit runtime-wide cutoff at dispatch time.
 
 Worker lifecycle methods and observer callbacks run inside the active lifecycle
 operation. They must not call public `Runtime` lifecycle methods recursively;
@@ -92,6 +92,10 @@ Readiness and command admission are related but separate.
 to that worker. `Drain` also marks the worker unready and not accepting new
 commands.
 
+Aggregate transitional lifecycle state is operational status, not command
+admission policy. If one worker is draining or stopping, another worker that is
+still running and accepting work remains eligible for command dispatch.
+
 This only controls Workerkit-managed command dispatch. It does not magically
 stop external queues, sockets, goroutines, or domain input sources owned by the
 worker. The worker still owns that domain behavior.
@@ -99,7 +103,7 @@ worker. The worker still owns that domain behavior.
 ## Drain
 
 `Drain` marks one worker as draining, unready, and not accepting new Workerkit
-commands.
+commands. It does not close command admission for unrelated running workers.
 
 `DrainAll` drains running workers in registration order and returns on the
 first error.
@@ -132,11 +136,17 @@ return runtime.Stop(ctx, "index")
 
 `Stop` stops one running, draining, or failed worker.
 
+`Stop` closes command admission for the target worker only. Aggregate runtime
+state may report `stopping` while its `Worker.Stop` method runs, but unrelated
+workers that remain running and accepting work can still receive commands.
+
 Stop timeouts are cooperative. Workerkit passes a deadline through the stop
 context; `Worker.Stop` must observe `ctx.Done()` and return.
 
 `StopAll` stops workers in reverse registration order and continues after
-individual stop failures.
+individual stop failures. It establishes a runtime-wide command-admission
+cutoff before stopping the first worker, so workers later in the sequence cannot
+accept new commands while an earlier `Worker.Stop` call is running.
 
 Stop does not wait for in-flight commands or cancel their contexts. A stopped
 worker may temporarily report a positive `InFlight` count while previously
@@ -153,9 +163,10 @@ and runtime concurrency limits and idle waits.
 
 `Shutdown` is the direct runtime convenience path for non-HTTP callers:
 
-1. drain all workers best-effort
-2. wait for runtime idle
-3. stop all workers
+1. close runtime-wide command admission
+2. drain all workers best-effort
+3. wait for runtime idle
+4. stop all workers
 
 Use `Shutdown` for CLIs, tests, and non-Servekit programs. When useful,
 `servekitservice.New` coordinates Workerkit lifecycle around an
@@ -209,9 +220,19 @@ Reports made after Stop completes, or through a stale generation handle after
 restart, return `ErrInvalidWorkerState` without mutating current worker status.
 
 When `LoopWorker.Stop` times out before its loop exits, the original stop remains
-active. A later Stop waits on that same loop and runs the configured cleanup hook
-at most once. Restart remains blocked until the loop has exited and cleanup has
-completed, preventing overlapping loop generations.
+active. A later Stop waits on that same loop. Only one configured cleanup-hook
+attempt runs at a time. If an attempt returns an error or its context expires,
+cleanup remains pending and a later Stop retries it. Restart remains blocked
+until the loop has exited and one cleanup attempt succeeds, preventing
+overlapping loop generations and resources.
+
+An unexpected loop exit reports the loop failure first, then makes one
+best-effort cleanup attempt with a five-second cooperative timeout. A failed
+automatic attempt does not replace the primary loop failure. It emits a separate
+sanitized cleanup-failure observation, using `loop_cleanup_failed` by default,
+and leaves cleanup pending for a later Stop. The automatic timeout is
+intentionally fixed; ordinary Stop retries use the worker's configured stop
+timeout.
 
 Stop cancellation suppresses only nil or cancellation-related loop results. If
 a loop returns an independent error while Stop races with it, Workerkit records
@@ -265,6 +286,14 @@ twice. `WithCheckResultObserver` and `WithCheckSummaryObserver` can retain
 result detail that is not represented in Workerkit's boolean worker readiness.
 Observers receive every completed result or summary, including a late value
 that Workerkit rejects for readiness after its deadline.
+
+Observers implementing `CheckExecutionObserver` also receive one start/end
+observation for every managed iteration. The bounded end event reports
+Workerkit-measured duration, checker versus check-group kind, ready/not-ready,
+timeout, cancellation, panic, or integration-error outcome, and whether policy
+continues the loop. These events drive the first-party slog and OpenTelemetry
+adapters; result and summary observers remain the application-controlled path
+for rich Opskit payloads.
 
 ## Servekit Readiness
 

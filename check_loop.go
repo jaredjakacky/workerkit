@@ -21,10 +21,14 @@ var (
 	ErrCheckLoopPanicked = errors.New("opskit check loop panicked")
 )
 
-// CheckResultObserver observes one completed Opskit check result.
+// CheckResultObserver observes one completed Opskit check result. Use it for
+// rich result payloads; bounded core execution telemetry is emitted through an
+// optional CheckExecutionObserver attached to the Runtime.
 type CheckResultObserver func(context.Context, opskit.CheckResult)
 
-// CheckSummaryObserver observes one completed Opskit check group summary.
+// CheckSummaryObserver observes one completed Opskit check group summary. Use
+// it for child result detail; bounded core execution telemetry is emitted
+// through an optional CheckExecutionObserver attached to the Runtime.
 type CheckSummaryObserver func(context.Context, opskit.CheckSummary)
 
 // CheckLoopOption configures a Workerkit loop that periodically executes
@@ -32,6 +36,7 @@ type CheckSummaryObserver func(context.Context, opskit.CheckSummary)
 type CheckLoopOption func(*checkLoopConfig)
 
 type checkLoopConfig struct {
+	kind                    CheckKind
 	interval                time.Duration
 	initialDelay            time.Duration
 	runImmediately          bool
@@ -48,6 +53,11 @@ type checkLoopOutcome struct {
 	ready   bool
 	state   opskit.State
 	message string
+}
+
+type checkLoopObservationRuntime interface {
+	startCheckObservation(context.Context, CheckKind, time.Time) (context.Context, CheckObservation)
+	endCheckObservation(context.Context, CheckObservation, CheckKind, CheckOutcome, bool, time.Time)
 }
 
 func defaultCheckLoopConfig() checkLoopConfig {
@@ -140,10 +150,12 @@ func WithCheckSummaryObserver(observer CheckSummaryObserver) CheckLoopOption {
 
 // NewCheckLoop constructs a Worker that periodically executes one Opskit
 // Checker. Workerkit owns the background execution policy, including timeout,
-// cancellation, panic recovery, and Workerkit failure reporting. The checked
-// component remains responsible for any cached dependency health state.
+// cancellation, panic recovery, bounded execution observation, and Workerkit
+// failure reporting. The checked component remains responsible for any cached
+// dependency health state.
 func NewCheckLoop(checker opskit.Checker, opts ...CheckLoopOption) Worker {
 	cfg := newCheckLoopConfig(opts)
+	cfg.kind = CheckKindChecker
 	cfg.panicErr = WithOperationalFailure(ErrCheckLoopPanicked, opskit.Failure{
 		Code:    FailureCodePanic,
 		Message: "opskit checker panicked: opskit check loop panicked",
@@ -174,10 +186,12 @@ func NewCheckLoop(checker opskit.Checker, opts ...CheckLoopOption) Worker {
 
 // NewCheckGroupLoop constructs a Worker that periodically executes one Opskit
 // CheckGroup. Workerkit owns the background execution policy, including timeout,
-// cancellation, panic recovery, and Workerkit failure reporting. The checked
-// component remains responsible for any cached dependency health state.
+// cancellation, panic recovery, bounded execution observation, and Workerkit
+// failure reporting. The checked component remains responsible for any cached
+// dependency health state.
 func NewCheckGroupLoop(group opskit.CheckGroup, opts ...CheckLoopOption) Worker {
 	cfg := newCheckLoopConfig(opts)
+	cfg.kind = CheckKindGroup
 	cfg.panicErr = WithOperationalFailure(ErrCheckLoopPanicked, opskit.Failure{
 		Code:    FailureCodePanic,
 		Message: "opskit check group panicked: opskit check loop panicked",
@@ -240,14 +254,22 @@ func runCheckLoop(ctx context.Context, runtime WorkerRuntime, cfg checkLoopConfi
 }
 
 func runCheckLoopOnce(ctx context.Context, runtime WorkerRuntime, cfg checkLoopConfig, run func(context.Context) checkLoopOutcome) (err error) {
+	loopCtx := ctx
+	startedAt := time.Now()
+	observedCtx, observation := startCheckLoopObservation(ctx, runtime, cfg.kind, startedAt)
+	ctx = observedCtx
+	executionOutcome := CheckOutcomeError
+	loopContinues := false
 	defer func() {
 		if recover() != nil {
+			executionOutcome = CheckOutcomePanic
 			if cfg.panicErr != nil {
 				err = cfg.panicErr
-				return
+			} else {
+				err = ErrCheckLoopPanicked
 			}
-			err = ErrCheckLoopPanicked
 		}
+		endCheckLoopObservation(ctx, runtime, observation, cfg.kind, executionOutcome, loopContinues, startedAt)
 	}()
 
 	checkCtx := ctx
@@ -257,39 +279,70 @@ func runCheckLoopOnce(ctx context.Context, runtime WorkerRuntime, cfg checkLoopC
 	}
 	defer cancel()
 
-	outcome := run(checkCtx)
+	checkOutcome := run(checkCtx)
 	checkErr := checkCtx.Err()
-	if parentErr := ctx.Err(); parentErr != nil {
+	if parentErr := loopCtx.Err(); parentErr != nil {
+		executionOutcome = CheckOutcomeCanceled
 		return parentErr
 	}
 	if checkErr != nil {
+		if errors.Is(checkErr, context.DeadlineExceeded) {
+			executionOutcome = CheckOutcomeTimeout
+		} else {
+			executionOutcome = CheckOutcomeCanceled
+		}
 		if cfg.readyOnSuccess {
 			if err := runtime.SetReady(false); err != nil {
+				executionOutcome = CheckOutcomeError
 				return err
 			}
 		}
 		if cfg.reportFailureOnNotReady {
-			if err := runtime.ReportFailure(checkErr); err != nil {
-				return err
-			}
 			return checkErr
 		}
+		loopContinues = true
 		return nil
 	}
 
+	if checkOutcome.ready {
+		executionOutcome = CheckOutcomeReady
+	} else {
+		executionOutcome = CheckOutcomeNotReady
+	}
 	if cfg.readyOnSuccess {
-		if err := runtime.SetReady(outcome.ready); err != nil {
+		if err := runtime.SetReady(checkOutcome.ready); err != nil {
+			executionOutcome = CheckOutcomeError
 			return err
 		}
 	}
-	if !outcome.ready && cfg.reportFailureOnNotReady {
-		err := checkLoopNotReadyError(outcome)
-		if err := runtime.ReportFailure(err); err != nil {
-			return err
-		}
-		return err
+	if !checkOutcome.ready && cfg.reportFailureOnNotReady {
+		return checkLoopNotReadyError(checkOutcome)
 	}
+	loopContinues = true
 	return nil
+}
+
+func startCheckLoopObservation(ctx context.Context, runtime WorkerRuntime, kind CheckKind, startedAt time.Time) (context.Context, CheckObservation) {
+	observedRuntime, ok := runtime.(checkLoopObservationRuntime)
+	if !ok {
+		return ctx, NopCheckObservation{}
+	}
+	observedCtx, observation := observedRuntime.startCheckObservation(ctx, kind, startedAt)
+	if observedCtx == nil {
+		observedCtx = ctx
+	}
+	if observation == nil {
+		observation = NopCheckObservation{}
+	}
+	return observedCtx, observation
+}
+
+func endCheckLoopObservation(ctx context.Context, runtime WorkerRuntime, observation CheckObservation, kind CheckKind, outcome CheckOutcome, loopContinues bool, startedAt time.Time) {
+	observedRuntime, ok := runtime.(checkLoopObservationRuntime)
+	if !ok {
+		return
+	}
+	observedRuntime.endCheckObservation(ctx, observation, kind, outcome, loopContinues, startedAt)
 }
 
 func waitCheckLoopDelay(ctx context.Context, delay time.Duration) error {

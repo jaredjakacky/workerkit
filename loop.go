@@ -66,10 +66,10 @@ func WithLoopStart(fn func(context.Context, WorkerRuntime) error) LoopWorkerOpti
 }
 
 // WithLoopStop sets an optional cleanup hook run after the loop goroutine
-// stops. The hook runs at most once, including after an unexpected loop failure.
-// Stop waits for an in-progress cleanup hook before returning. If Stop times
-// out before the loop exits, a later Stop resumes waiting on the same loop and
-// cleanup; Start remains blocked until both complete.
+// stops. Only one cleanup attempt runs at a time, including after an unexpected
+// loop failure. Stop waits for an in-progress attempt before returning. A hook
+// error leaves cleanup pending so a later Stop can retry it; Start remains
+// blocked until the loop has exited and one cleanup attempt succeeds.
 func WithLoopStop(fn func(context.Context, WorkerRuntime) error) LoopWorkerOption {
 	return func(cfg *loopWorkerConfig) {
 		cfg.onStop = fn
@@ -125,8 +125,16 @@ type LoopWorker struct {
 
 	stopHookRunning  bool
 	stopHookComplete bool
-	stopHookDone     chan struct{}
-	stopHookErr      error
+	stopHookAttempt  *loopStopHookAttempt
+}
+
+type loopStopHookAttempt struct {
+	done chan struct{}
+	err  error
+}
+
+type loopCleanupFailureReporter interface {
+	reportLoopCleanupFailure(error)
 }
 
 // NewLoopWorker constructs a LoopWorker for a long-running background loop.
@@ -236,17 +244,16 @@ func (w *LoopWorker) beginStart() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	if !w.stopHookComplete && (w.stopHookAttempt != nil || w.state == loopStopped) {
+		return newLoopCleanupError(fmt.Errorf("%w: state=%s cleanup=pending", ErrLoopWorkerActive, w.state))
+	}
 	if w.state == loopStarting || w.state == loopRunning || w.state == loopStopping {
 		return fmt.Errorf("%w: state=%s", ErrLoopWorkerActive, w.state)
-	}
-	if w.state == loopStopped && !w.stopHookComplete {
-		return fmt.Errorf("%w: state=%s cleanup=pending", ErrLoopWorkerActive, w.state)
 	}
 	w.state = loopStarting
 	w.stopHookRunning = false
 	w.stopHookComplete = false
-	w.stopHookDone = make(chan struct{})
-	w.stopHookErr = nil
+	w.stopHookAttempt = nil
 	return nil
 }
 
@@ -312,15 +319,16 @@ func (w *LoopWorker) runLoop(ctx context.Context, runtime WorkerRuntime, done ch
 	}
 	if err != nil {
 		_ = runtime.ReportFailure(err)
-		// Run failure cleanup here once because the loop has already exited and
-		// Stop can no longer wait on it. Preserve loop context values for
-		// telemetry, but bound cleanup because this path is best-effort and
-		// errors are ignored after the primary loop failure has already been
-		// reported.
+		// Run an initial failure-cleanup attempt here because the loop has already
+		// exited and Stop can no longer initiate cleanup by canceling it. Preserve
+		// loop context values for telemetry and bound this best-effort attempt. An
+		// unsuccessful attempt leaves cleanup pending for a later Stop retry.
 		stopCtx := context.WithoutCancel(ctx)
 		stopCtx, cancel := context.WithTimeout(stopCtx, loopFailureStopHookTimeout)
 		defer cancel()
-		_ = w.runStopHook(stopCtx, runtime)
+		if stopErr := w.runStopHook(stopCtx, runtime); stopErr != nil {
+			w.reportLoopCleanupFailure(runtime, stopErr)
+		}
 	}
 	w.finishLoop(done)
 }
@@ -341,59 +349,64 @@ func (w *LoopWorker) finishLoop(done chan struct{}) {
 	close(done)
 }
 
-func (w *LoopWorker) runStopHook(ctx context.Context, runtime WorkerRuntime) error {
-	done, run, err := w.beginStopHook()
-	if err != nil || !run {
-		if err != nil {
-			return err
-		}
+func (w *LoopWorker) runStopHook(ctx context.Context, runtime WorkerRuntime) (err error) {
+	attempt, run := w.beginStopHook()
+	if !run {
 		select {
-		case <-done:
-			return w.completedStopHookError()
+		case <-attempt.done:
+			return attempt.err
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
 
 	defer func() {
-		w.finishStopHook(done, err)
+		if recovered := recover(); recovered != nil {
+			w.finishStopHook(attempt, newLoopCleanupError(errors.New("loop worker cleanup panicked")))
+			panic(recovered)
+		}
+		w.finishStopHook(attempt, err)
 	}()
 	if w.onStop != nil {
 		err = w.onStop(ctx, runtime)
 	}
+	if err != nil {
+		err = newLoopCleanupError(err)
+	}
 	return err
 }
 
-func (w *LoopWorker) beginStopHook() (chan struct{}, bool, error) {
+func (w *LoopWorker) beginStopHook() (*loopStopHookAttempt, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	if w.stopHookComplete {
-		return w.stopHookDone, false, nil
-	}
-	if w.stopHookDone == nil {
-		w.stopHookDone = make(chan struct{})
+		return w.stopHookAttempt, false
 	}
 	if w.stopHookRunning {
-		return w.stopHookDone, false, nil
+		return w.stopHookAttempt, false
 	}
+	attempt := &loopStopHookAttempt{done: make(chan struct{})}
+	w.stopHookAttempt = attempt
 	w.stopHookRunning = true
-	return w.stopHookDone, true, nil
+	return attempt, true
 }
 
-func (w *LoopWorker) finishStopHook(done chan struct{}, err error) {
+func (w *LoopWorker) finishStopHook(attempt *loopStopHookAttempt, err error) {
 	w.mu.Lock()
-	if w.stopHookDone == done && !w.stopHookComplete {
-		w.stopHookErr = err
+	if w.stopHookAttempt == attempt && w.stopHookRunning {
+		attempt.err = err
 		w.stopHookRunning = false
-		w.stopHookComplete = true
-		close(done)
+		w.stopHookComplete = err == nil
+		close(attempt.done)
 	}
 	w.mu.Unlock()
 }
 
-func (w *LoopWorker) completedStopHookError() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.stopHookErr
+func (w *LoopWorker) reportLoopCleanupFailure(runtime WorkerRuntime, err error) {
+	reporter, ok := runtime.(loopCleanupFailureReporter)
+	if !ok {
+		return
+	}
+	reporter.reportLoopCleanupFailure(err)
 }

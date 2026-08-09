@@ -1,6 +1,9 @@
 package workerkit
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Worker is the lifecycle contract managed by a Runtime.
 //
@@ -37,9 +40,11 @@ import "context"
 // call when some resources were never acquired, were already released, or when
 // background work has already exited.
 //
-// If Stop returns because its context expired before cleanup completed, a later
-// Stop may be called to resume waiting and finish cleanup. Start must not launch
-// duplicate background work while the previous stop remains active.
+// If Stop returns before cleanup completes, whether from context expiry or a
+// cleanup error, a later Stop may be called to resume waiting or retry cleanup.
+// Implementations should return nil only after worker-owned cleanup is complete
+// and make unsuccessful cleanup safe to retry. Start must not launch duplicate
+// background work while the previous stop remains active.
 //
 // Start and Stop must honor context cancellation. Runtime timeouts are delivered
 // through ctx.Done(). Workerkit cannot interrupt implementations that block
@@ -151,6 +156,18 @@ func (h *workerControlHandle) SetAcceptingWork(accepting bool) error {
 
 func (h *workerControlHandle) ReportFailure(err error) error {
 	return h.runtime.reportWorkerFailure(h.context(), h.name, h.generation, err)
+}
+
+func (h *workerControlHandle) startCheckObservation(ctx context.Context, kind CheckKind, startedAt time.Time) (context.Context, CheckObservation) {
+	return h.runtime.startCheckObservation(ctx, h.name, kind, startedAt)
+}
+
+func (h *workerControlHandle) endCheckObservation(ctx context.Context, observation CheckObservation, kind CheckKind, outcome CheckOutcome, loopContinues bool, startedAt time.Time) {
+	h.runtime.endCheckObservation(ctx, observation, h.name, kind, outcome, loopContinues, startedAt)
+}
+
+func (h *workerControlHandle) reportLoopCleanupFailure(err error) {
+	h.runtime.observeLoopCleanupFailure(h.context(), h.name, err)
 }
 
 func (h *workerControlHandle) context() context.Context {

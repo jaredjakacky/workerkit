@@ -97,14 +97,15 @@ The common lifecycle methods are:
 - `DrainAllBestEffort` attempts to drain all running workers and joins errors.
 - `WaitIdle` waits for one worker to have no in-flight commands.
 - `WaitAllIdle` waits for runtime-wide command idleness.
-- `Stop` stops one worker.
-- `StopAll` stops workers in reverse registration order.
-- `Shutdown` drains all workers best-effort, waits for runtime idle, then stops.
+- `Stop` stops one worker and closes admission for that worker only.
+- `StopAll` closes runtime-wide command admission and stops workers in reverse registration order.
+- `Shutdown` closes runtime-wide command admission, drains all workers best-effort, waits for runtime idle, then stops.
 
 Lifecycle mutations are serialized per runtime. Concurrent calls wait for the
 active lifecycle operation, and that wait counts against their context
 deadline. Command dispatch and status reads remain concurrent with lifecycle
-operations and are gated by current runtime state.
+operations. Dispatch is gated by any explicit runtime-wide cutoff plus the
+target worker's lifecycle and accepting-work state.
 
 For the full lifecycle model, read [`lifecycle.md`](lifecycle.md).
 

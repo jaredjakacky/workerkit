@@ -27,7 +27,8 @@ type runtimeLifecycleResult struct {
 // requests are serialized by Runtime, and time waiting for the active operation
 // counts against the lifecycle request timeout. Stop routes use immediate
 // Runtime.Stop and Runtime.StopAll semantics: they do not wait for or cancel
-// commands that were already admitted.
+// commands that were already admitted. Worker Stop closes admission only for
+// its target; StopAll establishes a runtime-wide cutoff.
 func registerLifecycleRoutes(server *servekit.Server, runtime *workerkit.Runtime, cfg config) {
 	opts := lifecycleEndpointOptions(cfg)
 
