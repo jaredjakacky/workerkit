@@ -16,7 +16,8 @@ var (
 	ErrLoopExitedUnexpectedly = errors.New("loop worker exited unexpectedly")
 	// ErrLoopWorkerActive reports that Start found an existing loop lifecycle in
 	// progress instead of launching a new loop.
-	ErrLoopWorkerActive = errors.New("loop worker already active")
+	ErrLoopWorkerActive    = errors.New("loop worker already active")
+	errLoopCleanupPanicked = errors.New("loop worker cleanup panicked")
 )
 
 // LoopFunc is the long-running background function managed by LoopWorker.
@@ -69,7 +70,8 @@ func WithLoopStart(fn func(context.Context, WorkerRuntime) error) LoopWorkerOpti
 // stops. Only one cleanup attempt runs at a time, including after an unexpected
 // loop failure. Stop waits for an in-progress attempt before returning. A hook
 // error leaves cleanup pending so a later Stop can retry it; Start remains
-// blocked until the loop has exited and one cleanup attempt succeeds.
+// blocked until the loop has exited and one cleanup attempt succeeds. Hook
+// panics follow the worker's configured PanicPolicy.
 func WithLoopStop(fn func(context.Context, WorkerRuntime) error) LoopWorkerOption {
 	return func(cfg *loopWorkerConfig) {
 		cfg.onStop = fn
@@ -134,7 +136,11 @@ type loopStopHookAttempt struct {
 }
 
 type loopCleanupFailureReporter interface {
-	reportLoopCleanupFailure(error)
+	reportLoopCleanupFailure(error, bool)
+}
+
+type loopCleanupPanicPolicy interface {
+	crashOnLoopCleanupPanic() bool
 }
 
 // NewLoopWorker constructs a LoopWorker for a long-running background loop.
@@ -326,9 +332,7 @@ func (w *LoopWorker) runLoop(ctx context.Context, runtime WorkerRuntime, done ch
 		stopCtx := context.WithoutCancel(ctx)
 		stopCtx, cancel := context.WithTimeout(stopCtx, loopFailureStopHookTimeout)
 		defer cancel()
-		if stopErr := w.runStopHook(stopCtx, runtime); stopErr != nil {
-			w.reportLoopCleanupFailure(runtime, stopErr)
-		}
+		w.runFailureStopHook(stopCtx, runtime)
 	}
 	w.finishLoop(done)
 }
@@ -362,7 +366,7 @@ func (w *LoopWorker) runStopHook(ctx context.Context, runtime WorkerRuntime) (er
 
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			w.finishStopHook(attempt, newLoopCleanupError(errors.New("loop worker cleanup panicked")))
+			w.finishStopHook(attempt, newLoopCleanupError(errLoopCleanupPanicked))
 			panic(recovered)
 		}
 		w.finishStopHook(attempt, err)
@@ -374,6 +378,21 @@ func (w *LoopWorker) runStopHook(ctx context.Context, runtime WorkerRuntime) (er
 		err = newLoopCleanupError(err)
 	}
 	return err
+}
+
+func (w *LoopWorker) runFailureStopHook(ctx context.Context, runtime WorkerRuntime) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			w.reportLoopCleanupFailure(runtime, newLoopCleanupError(errLoopCleanupPanicked), true)
+			if policy, ok := runtime.(loopCleanupPanicPolicy); ok && policy.crashOnLoopCleanupPanic() {
+				panic(recovered)
+			}
+		}
+	}()
+
+	if err := w.runStopHook(ctx, runtime); err != nil {
+		w.reportLoopCleanupFailure(runtime, err, false)
+	}
 }
 
 func (w *LoopWorker) beginStopHook() (*loopStopHookAttempt, bool) {
@@ -403,10 +422,10 @@ func (w *LoopWorker) finishStopHook(attempt *loopStopHookAttempt, err error) {
 	w.mu.Unlock()
 }
 
-func (w *LoopWorker) reportLoopCleanupFailure(runtime WorkerRuntime, err error) {
+func (w *LoopWorker) reportLoopCleanupFailure(runtime WorkerRuntime, err error, panicked bool) {
 	reporter, ok := runtime.(loopCleanupFailureReporter)
 	if !ok {
 		return
 	}
-	reporter.reportLoopCleanupFailure(err)
+	reporter.reportLoopCleanupFailure(err, panicked)
 }

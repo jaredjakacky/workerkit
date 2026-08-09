@@ -441,7 +441,7 @@ Default worker options are copied into each worker when it is registered. Later 
 
 - `PanicPolicy`
 
-  Controls how the runtime treats panics inside managed `Start`, `Stop`, and command paths.
+  Controls how the runtime treats panics inside managed `Start`, `Stop`, automatic `LoopWorker` cleanup, and command paths.
 
 - `PanicPolicyRecover`
 
@@ -485,7 +485,10 @@ Default worker options are copied into each worker when it is registered. Later 
 
 - `CommandStartEvent`
 
-  Start of one command dispatch. Observers may return a derived context and command observation.
+  Start of one dispatch after the registered command target is resolved. Worker
+  and command identities are registration-owned. Malformed and unregistered
+  targets do not emit command observations. Observers may return a derived
+  context and command observation.
 
 - `CommandObservation`
 
@@ -493,10 +496,10 @@ Default worker options are copied into each worker when it is registered. Later 
 
 - `CommandEndEvent`
 
-  End of one command dispatch. Includes final success/failure, duration,
-  dispatch id, attempt count, safe public failure code/message, and the private
-  original `Cause`. Custom observers must not publish `Cause` without explicit
-  application policy.
+  End of one dispatch to a registered command. Includes admission and execution
+  failures, final success/failure, duration, dispatch id, attempt count, safe
+  public failure code/message, and the private original `Cause`. Custom observers
+  must not publish `Cause` without explicit application policy.
 
 - `CheckStartEvent`
 
@@ -601,7 +604,8 @@ Default worker options are copied into each worker when it is registered. Later 
 
   Sets an optional cleanup hook that runs after the loop goroutine stops. Only
   one attempt runs at a time. Failed attempts are retryable through a later Stop,
-  and the hook should return nil only after cleanup is complete.
+  and the hook should return nil only after cleanup is complete. Hook panics
+  follow the worker's configured panic policy.
 
 - `WithLoopAutoReady(enabled bool)`
 

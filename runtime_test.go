@@ -3,6 +3,7 @@ package workerkit_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	. "github.com/jaredjakacky/workerkit"
 	"strings"
 	"sync"
@@ -1555,6 +1556,74 @@ func TestWaitIdleAndWaitAllIdleReturnContextErrorWhileBusy(t *testing.T) {
 	}
 	if err := rt.WaitAllIdle(context.Background()); err != nil {
 		t.Fatalf("WaitAllIdle after release returned error: %v", err)
+	}
+}
+
+func TestDispatchObservationRequiresRegisteredTarget(t *testing.T) {
+	first := &recordingObserver{}
+	second := &recordingObserver{}
+	rt := newTestRuntime(t, WithObserver(MultiObserver(first, second)))
+	if err := rt.Register(
+		WorkerSpec{Name: "worker", Worker: testWorker{}},
+		WithWorkerAcceptingWorkOnStart(false),
+		WithCommand("work", CommandHandlerFunc(func(context.Context, CommandRequest) (CommandResult, error) {
+			return CommandResult{}, nil
+		})),
+	); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	if _, err := rt.Dispatch(context.Background(), CommandRequest{Worker: "Bad", Name: "work"}); err == nil {
+		t.Fatal("malformed target Dispatch returned nil, want error")
+	}
+	for i := range 32 {
+		_, err := rt.Dispatch(context.Background(), CommandRequest{
+			Worker: fmt.Sprintf("missing-worker-%d", i),
+			Name:   "work",
+		})
+		if !errors.Is(err, ErrWorkerNotFound) {
+			t.Fatalf("unknown worker %d Dispatch error = %v, want ErrWorkerNotFound", i, err)
+		}
+		_, err = rt.Dispatch(context.Background(), CommandRequest{
+			Worker: "worker",
+			Name:   fmt.Sprintf("missing-command-%d", i),
+		})
+		if !errors.Is(err, ErrCommandNotFound) {
+			t.Fatalf("unknown command %d Dispatch error = %v, want ErrCommandNotFound", i, err)
+		}
+	}
+	for name, observer := range map[string]*recordingObserver{"first": first, "second": second} {
+		events := observer.snapshot()
+		if len(events.commandStarts) != 0 || len(events.commandEnds) != 0 {
+			t.Fatalf("%s observer received command lookup events: starts=%#v ends=%#v", name, events.commandStarts, events.commandEnds)
+		}
+	}
+
+	if err := rt.Start(context.Background(), "worker"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = rt.Stop(context.Background(), "worker") })
+	_, err := rt.Dispatch(context.Background(), CommandRequest{Worker: "worker", Name: "work"})
+	if !errors.Is(err, ErrWorkerNotAcceptingWork) {
+		t.Fatalf("known command admission error = %v, want ErrWorkerNotAcceptingWork", err)
+	}
+
+	for name, observer := range map[string]*recordingObserver{"first": first, "second": second} {
+		events := observer.snapshot()
+		if len(events.commandStarts) != 1 || len(events.commandEnds) != 1 {
+			t.Fatalf("%s observer command events: starts=%d ends=%d, want 1 each", name, len(events.commandStarts), len(events.commandEnds))
+		}
+		start := events.commandStarts[0]
+		if start.Worker != "test-runtime/worker" || start.Command != "work" || start.DispatchID != "test-runtime-1" {
+			t.Fatalf("%s command start = %#v, want canonical registered target", name, start)
+		}
+		end := events.commandEnds[0]
+		if end.Worker != start.Worker || end.Command != start.Command || end.DispatchID != start.DispatchID {
+			t.Fatalf("%s command end = %#v, want start identity %#v", name, end, start)
+		}
+		if end.Success || end.Attempts != 0 {
+			t.Fatalf("%s command end = %#v, want failed admission with zero attempts", name, end)
+		}
 	}
 }
 

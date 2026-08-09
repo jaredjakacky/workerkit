@@ -133,8 +133,11 @@ A dispatch must pass both gates. Runtime saturation returns
 
 ## Panic Policy
 
-Panic policy controls how Workerkit treats panics in managed lifecycle and
-command execution.
+Panic policy controls how Workerkit treats panics in managed lifecycle,
+automatic `LoopWorker` cleanup, and command execution. Under the default
+recovery policy, an automatic cleanup panic is sanitized, leaves cleanup
+pending, and can be retried by a later Stop. Crash policy surfaces the original
+panic after best-effort telemetry.
 
 Runtime default:
 

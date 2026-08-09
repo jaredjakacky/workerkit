@@ -166,8 +166,16 @@ func (h *workerControlHandle) endCheckObservation(ctx context.Context, observati
 	h.runtime.endCheckObservation(ctx, observation, h.name, kind, outcome, loopContinues, startedAt)
 }
 
-func (h *workerControlHandle) reportLoopCleanupFailure(err error) {
-	h.runtime.observeLoopCleanupFailure(h.context(), h.name, err)
+func (h *workerControlHandle) reportLoopCleanupFailure(err error, panicked bool) {
+	h.runtime.observeLoopCleanupFailure(h.context(), h.name, err, panicked)
+}
+
+func (h *workerControlHandle) crashOnLoopCleanupPanic() bool {
+	h.runtime.mu.RLock()
+	defer h.runtime.mu.RUnlock()
+
+	cfg, ok := h.runtime.workerConfigs[h.name]
+	return ok && cfg.panicPolicy == PanicPolicyCrash
 }
 
 func (h *workerControlHandle) context() context.Context {
