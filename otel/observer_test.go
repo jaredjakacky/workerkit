@@ -3,6 +3,7 @@ package otel_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	. "github.com/jaredjakacky/workerkit/otel"
 	"strings"
 	"sync"
@@ -210,6 +211,72 @@ func TestStartCommandRecordsSpanAndCommandMetrics(t *testing.T) {
 	assertBoolAttr(t, commandDuration.records[0].attrs, "workerkit.command.success", true)
 	assertNoAttr(t, commandDuration.records[0].attrs, "workerkit.command.dispatch_id")
 	assertNoAttr(t, commandDuration.records[0].attrs, "workerkit.command.attempts")
+}
+
+func TestRuntimeDispatchDoesNotObserveUnknownCommandTargets(t *testing.T) {
+	observer, tracerProvider, meterProvider := newTestObserver(t)
+	runtime, err := workerkit.New(
+		workerkit.Identity{Name: "runtime-a"},
+		workerkit.WithObserver(observer),
+	)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	if err := runtime.Register(
+		workerkit.WorkerSpec{Name: "worker", Worker: telemetryTestWorker{}},
+		workerkit.WithCommand("sync", workerkit.CommandHandlerFunc(func(context.Context, workerkit.CommandRequest) (workerkit.CommandResult, error) {
+			return workerkit.CommandResult{}, nil
+		})),
+	); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	for i := range 32 {
+		_, err := runtime.Dispatch(context.Background(), workerkit.CommandRequest{
+			Worker: fmt.Sprintf("missing-worker-%d", i),
+			Name:   "sync",
+		})
+		if !errors.Is(err, workerkit.ErrWorkerNotFound) {
+			t.Fatalf("unknown worker %d Dispatch error = %v, want ErrWorkerNotFound", i, err)
+		}
+		_, err = runtime.Dispatch(context.Background(), workerkit.CommandRequest{
+			Worker: "worker",
+			Name:   fmt.Sprintf("missing-command-%d", i),
+		})
+		if !errors.Is(err, workerkit.ErrCommandNotFound) {
+			t.Fatalf("unknown command %d Dispatch error = %v, want ErrCommandNotFound", i, err)
+		}
+	}
+	if got := len(tracerProvider.tracer.spans); got != 0 {
+		t.Fatalf("command spans after unknown targets = %d, want 0", got)
+	}
+	commandCount := meterProvider.meter.counter("workerkit.command.dispatches")
+	if got := commandCount.total(); got != 0 {
+		t.Fatalf("command count after unknown targets = %d, want 0", got)
+	}
+	commandDuration := meterProvider.meter.histogram("workerkit.command.duration")
+	if got := len(commandDuration.records); got != 0 {
+		t.Fatalf("command durations after unknown targets = %d, want 0", got)
+	}
+
+	_, err = runtime.Dispatch(context.Background(), workerkit.CommandRequest{Worker: "worker", Name: "sync"})
+	if !errors.Is(err, workerkit.ErrRuntimeNotAcceptingWork) {
+		t.Fatalf("known command admission error = %v, want ErrRuntimeNotAcceptingWork", err)
+	}
+	span := tracerProvider.tracer.onlySpan(t)
+	if span.name != "workerkit.command sync" {
+		t.Fatalf("known command span name = %q, want %q", span.name, "workerkit.command sync")
+	}
+	assertStringAttr(t, span.attrs, "workerkit.worker", "runtime-a/worker")
+	assertStringAttr(t, span.attrs, "workerkit.command", "sync")
+	if got := commandCount.total(); got != 1 {
+		t.Fatalf("known admission command count = %d, want 1", got)
+	}
+	if got := len(commandDuration.records); got != 1 {
+		t.Fatalf("known admission command durations = %d, want 1", got)
+	}
+	assertStringAttr(t, commandCount.adds[0].attrs, "workerkit.worker", "runtime-a/worker")
+	assertStringAttr(t, commandCount.adds[0].attrs, "workerkit.command", "sync")
 }
 
 func TestCommandEndRecordsFailureSpanAndMetrics(t *testing.T) {
@@ -565,6 +632,12 @@ func TestObserverSupportsConcurrentUse(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+type telemetryTestWorker struct{}
+
+func (telemetryTestWorker) Start(context.Context) error { return nil }
+
+func (telemetryTestWorker) Stop(context.Context) error { return nil }
 
 func newTestObserver(t *testing.T) (*Observer, *recordingTracerProvider, *recordingMeterProvider) {
 	t.Helper()

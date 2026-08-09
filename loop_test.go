@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	. "github.com/jaredjakacky/workerkit"
+	"os"
+	"os/exec"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -716,6 +718,241 @@ func TestLoopWorkerFailureCleanupErrorBlocksRestartUntilStopRetrySucceeds(t *tes
 	})
 }
 
+func TestLoopWorkerAutomaticCleanupPanicRecoversAndRetries(t *testing.T) {
+	const privatePanicDetail = "broker unsubscribe token=private"
+	loopErr := errors.New("loop failed")
+	loopRelease := make(chan struct{})
+	started := make(chan int32, 3)
+	cleanupAttempts := make(chan int32, 3)
+	var starts atomic.Int32
+	var stops atomic.Int32
+	var active atomic.Int32
+	var maxActive atomic.Int32
+	observer := &recordingObserver{}
+	worker := NewLoopWorker(
+		func(ctx context.Context, _ WorkerRuntime) error {
+			current := active.Add(1)
+			defer active.Add(-1)
+			for {
+				max := maxActive.Load()
+				if current <= max || maxActive.CompareAndSwap(max, current) {
+					break
+				}
+			}
+			n := starts.Add(1)
+			started <- n
+			if n == 1 {
+				<-loopRelease
+				return loopErr
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		WithLoopStop(func(context.Context, WorkerRuntime) error {
+			n := stops.Add(1)
+			cleanupAttempts <- n
+			if n == 1 {
+				panic(privatePanicDetail)
+			}
+			return nil
+		}),
+	)
+	rt := newTestRuntime(t, WithObserver(observer))
+	if err := rt.Register(WorkerSpec{Name: "loop", Worker: worker}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "loop"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	if got := readLoopAttempt(t, started); got != 1 {
+		t.Fatalf("first loop generation = %d, want 1", got)
+	}
+
+	close(loopRelease)
+	if got := readLoopAttempt(t, cleanupAttempts); got != 1 {
+		t.Fatalf("automatic cleanup attempt = %d, want 1", got)
+	}
+	failed := waitForLoopState(t, rt, StateFailed)
+	if failed.Status.LastFailure == nil || failed.Status.LastFailure.Code != FailureCodeWorkerFailed {
+		t.Fatalf("LastFailure = %#v, want original loop failure", failed.Status.LastFailure)
+	}
+	if strings.Contains(failed.Status.LastFailure.Message, privatePanicDetail) {
+		t.Fatalf("LastFailure exposed panic payload: %#v", failed.Status.LastFailure)
+	}
+
+	event := waitForLoopCleanupPanicEvent(t, observer)
+	if event.Code != FailureCodeLoopCleanupFailed || event.Message != "loop worker cleanup failed" || !event.Panic {
+		t.Fatalf("cleanup FailureEvent = %#v, want sanitized panic-marked cleanup failure", event)
+	}
+	if event.Cause == nil {
+		t.Fatal("cleanup FailureEvent Cause = nil, want sanitized private cause")
+	}
+	if strings.Contains(event.Code, privatePanicDetail) ||
+		strings.Contains(event.Message, privatePanicDetail) ||
+		strings.Contains(event.Cause.Error(), privatePanicDetail) {
+		t.Fatalf("cleanup FailureEvent exposed panic payload: %#v", event)
+	}
+	var cleanupFailures int
+	for _, failure := range observer.snapshot().failures {
+		if failure.Code == FailureCodeLoopCleanupFailed {
+			cleanupFailures++
+		}
+	}
+	if cleanupFailures != 1 {
+		t.Fatalf("automatic cleanup failure events = %d, want 1", cleanupFailures)
+	}
+	assertSingleLoopCleanupPanicEvent(t, observer)
+
+	if err := rt.Start(context.Background(), "loop"); !errors.Is(err, ErrLoopWorkerActive) {
+		t.Fatalf("Start with pending panicked cleanup = %v, want ErrLoopWorkerActive", err)
+	}
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("loop starts = %d, want 1 before cleanup succeeds", got)
+	}
+	assertSingleLoopCleanupPanicEvent(t, observer)
+
+	if err := rt.Stop(context.Background(), "loop"); err != nil {
+		t.Fatalf("cleanup retry Stop returned error: %v", err)
+	}
+	if got := readLoopAttempt(t, cleanupAttempts); got != 2 {
+		t.Fatalf("cleanup retry attempt = %d, want 2", got)
+	}
+	if err := rt.Start(context.Background(), "loop"); err != nil {
+		t.Fatalf("restart after successful cleanup returned error: %v", err)
+	}
+	if got := readLoopAttempt(t, started); got != 2 {
+		t.Fatalf("second loop generation = %d, want 2", got)
+	}
+	if got := maxActive.Load(); got != 1 {
+		t.Fatalf("maximum active loop generations = %d, want 1", got)
+	}
+	t.Cleanup(func() {
+		_ = rt.Stop(context.Background(), "loop")
+	})
+}
+
+func TestLoopWorkerAutomaticCleanupPanicConcurrentStopRetriesWithoutOverlap(t *testing.T) {
+	loopRelease := make(chan struct{})
+	firstEntered := make(chan struct{})
+	firstRelease := make(chan struct{})
+	retryEntered := make(chan struct{})
+	var attempts atomic.Int32
+	var active atomic.Int32
+	var maxActive atomic.Int32
+	observer := &recordingObserver{}
+	worker := NewLoopWorker(
+		func(context.Context, WorkerRuntime) error {
+			<-loopRelease
+			return errors.New("loop failed")
+		},
+		WithLoopStop(func(context.Context, WorkerRuntime) error {
+			current := active.Add(1)
+			defer active.Add(-1)
+			for {
+				max := maxActive.Load()
+				if current <= max || maxActive.CompareAndSwap(max, current) {
+					break
+				}
+			}
+			switch attempts.Add(1) {
+			case 1:
+				close(firstEntered)
+				<-firstRelease
+				panic("private cleanup panic")
+			case 2:
+				close(retryEntered)
+				return nil
+			default:
+				return errors.New("unexpected cleanup attempt")
+			}
+		}),
+	)
+	rt := newTestRuntime(t, WithObserver(observer))
+	if err := rt.Register(WorkerSpec{Name: "loop", Worker: worker}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "loop"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	close(loopRelease)
+	select {
+	case <-firstEntered:
+	case <-time.After(time.Second):
+		t.Fatal("automatic cleanup did not start")
+	}
+	waitForLoopState(t, rt, StateFailed)
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- rt.Stop(context.Background(), "loop") }()
+	waitForLoopState(t, rt, StateStopping)
+	close(firstRelease)
+	select {
+	case <-retryEntered:
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not retry panicked automatic cleanup")
+	}
+	if err := <-stopDone; err != nil {
+		t.Fatalf("Stop returned error: %v", err)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("cleanup attempts = %d, want 2", got)
+	}
+	if got := maxActive.Load(); got != 1 {
+		t.Fatalf("maximum concurrent cleanup attempts = %d, want 1", got)
+	}
+	assertSingleLoopCleanupPanicEvent(t, observer)
+	stopped := waitForLoopState(t, rt, StateStopped)
+	if stopped.Status.LastFailure == nil || stopped.Status.LastFailure.Code != FailureCodeWorkerFailed {
+		t.Fatalf("LastFailure = %#v, want original loop failure", stopped.Status.LastFailure)
+	}
+}
+
+func TestLoopWorkerAutomaticCleanupPanicHonorsCrashPolicy(t *testing.T) {
+	const (
+		childEnvironment = "WORKERKIT_AUTOMATIC_CLEANUP_CRASH_CHILD"
+		privatePanic     = "private automatic cleanup crash payload"
+	)
+	if os.Getenv(childEnvironment) == "1" {
+		worker := NewLoopWorker(
+			func(context.Context, WorkerRuntime) error {
+				return errors.New("loop failed")
+			},
+			WithLoopStop(func(context.Context, WorkerRuntime) error {
+				panic(privatePanic)
+			}),
+		)
+		rt := newTestRuntime(t,
+			WithDefaultPanicPolicy(PanicPolicyCrash),
+			WithObserver(cleanupCrashMarkerObserver{privatePanic: privatePanic}),
+		)
+		if err := rt.Register(WorkerSpec{Name: "loop", Worker: worker}); err != nil {
+			t.Fatalf("Register returned error: %v", err)
+		}
+		if err := rt.Start(context.Background(), "loop"); err != nil {
+			t.Fatalf("Start returned error: %v", err)
+		}
+		select {}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLoopWorkerAutomaticCleanupPanicHonorsCrashPolicy$")
+	cmd.Env = append(os.Environ(), childEnvironment+"=1")
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("crash-policy child did not terminate after cleanup panic: %v", ctx.Err())
+	}
+	if err == nil {
+		t.Fatalf("crash-policy child exited successfully, want panic: %s", output)
+	}
+	if !strings.Contains(string(output), cleanupCrashObservationMarker) {
+		t.Fatalf("crash-policy child did not emit sanitized cleanup observation: %s", output)
+	}
+	if !strings.Contains(string(output), privatePanic) {
+		t.Fatalf("crash-policy child did not re-panic with original value: %s", output)
+	}
+}
+
 func TestLoopWorkerStopRetriesCleanupAfterHookTimeout(t *testing.T) {
 	var attempts atomic.Int32
 	worker := NewLoopWorker(
@@ -917,6 +1154,48 @@ func TestLoopWorkerCleanupPanicLeavesCleanupPending(t *testing.T) {
 	}
 }
 
+func TestLoopWorkerCleanupPanicDuringStopHonorsCrashPolicy(t *testing.T) {
+	const panicValue = "cleanup crash policy panic"
+	var attempts atomic.Int32
+	worker := NewLoopWorker(
+		func(ctx context.Context, _ WorkerRuntime) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		WithLoopStop(func(context.Context, WorkerRuntime) error {
+			if attempts.Add(1) == 1 {
+				panic(panicValue)
+			}
+			return nil
+		}),
+	)
+	rt := newTestRuntime(t, WithDefaultPanicPolicy(PanicPolicyCrash))
+	if err := rt.Register(WorkerSpec{Name: "loop", Worker: worker}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := rt.Start(context.Background(), "loop"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		_ = rt.Stop(context.Background(), "loop")
+	}()
+	if recovered != panicValue {
+		t.Fatalf("Stop recovered value = %#v, want %q", recovered, panicValue)
+	}
+	if err := rt.Start(context.Background(), "loop"); !errors.Is(err, ErrLoopWorkerActive) {
+		t.Fatalf("Start after cleanup panic = %v, want ErrLoopWorkerActive", err)
+	}
+	if err := rt.Stop(context.Background(), "loop"); err != nil {
+		t.Fatalf("cleanup retry Stop returned error: %v", err)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("cleanup attempts = %d, want 2", got)
+	}
+}
+
 func TestLoopWorkerStopAllRetriesPendingFailureCleanup(t *testing.T) {
 	loopRelease := make(chan struct{})
 	cleanupAttempted := make(chan int32, 2)
@@ -1087,4 +1366,56 @@ func waitForLoopFailureEvent(t *testing.T, observer *recordingObserver, cause er
 			time.Sleep(time.Millisecond)
 		}
 	}
+}
+
+func waitForLoopCleanupPanicEvent(t *testing.T, observer *recordingObserver) FailureEvent {
+	t.Helper()
+
+	deadline := time.After(time.Second)
+	for {
+		for _, event := range observer.snapshot().failures {
+			if event.Code == FailureCodeLoopCleanupFailed && event.Panic {
+				return event
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatal("panic-marked loop cleanup failure event was not observed")
+			return FailureEvent{}
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
+func assertSingleLoopCleanupPanicEvent(t *testing.T, observer *recordingObserver) {
+	t.Helper()
+
+	var count int
+	for _, event := range observer.snapshot().failures {
+		if event.Code == FailureCodeLoopCleanupFailed && event.Panic {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("panic-marked loop cleanup failure events = %d, want 1", count)
+	}
+}
+
+const cleanupCrashObservationMarker = "sanitized automatic cleanup panic observed"
+
+type cleanupCrashMarkerObserver struct {
+	NopObserver
+	privatePanic string
+}
+
+func (o cleanupCrashMarkerObserver) ObserveFailure(_ context.Context, event FailureEvent) {
+	if event.Code != FailureCodeLoopCleanupFailed || !event.Panic || event.Cause == nil {
+		return
+	}
+	if strings.Contains(event.Message, o.privatePanic) || strings.Contains(event.Cause.Error(), o.privatePanic) {
+		_, _ = os.Stdout.WriteString("unsafe automatic cleanup panic observation\n")
+		return
+	}
+	_, _ = os.Stdout.WriteString(cleanupCrashObservationMarker + "\n")
 }

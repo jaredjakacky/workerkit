@@ -201,9 +201,12 @@ func (r *Runtime) Register(reg WorkerSpec, opts ...WorkerOption) error {
 
 // Dispatch routes one command request to a registered worker command handler.
 //
-// Dispatch normalizes the target, admits the command, reserves capacity, runs
-// the handler under the worker's command timeout and retry policy, records
-// command failures, applies panic policy, and emits command observations.
+// Dispatch normalizes and resolves the registered target, then admits the
+// command, reserves capacity, runs the handler under the worker's command
+// timeout and retry policy, records command failures, applies panic policy, and
+// emits command observations. Malformed and unregistered targets return before
+// command observation so caller-provided lookup values do not become command
+// telemetry dimensions.
 //
 // The command timeout is a cooperative context deadline passed to the command
 // handler. The handler must observe ctx.Done() and return. Workerkit cannot
@@ -230,16 +233,20 @@ func (r *Runtime) Dispatch(ctx context.Context, req CommandRequest) (res Command
 		return CommandResult{}, err
 	}
 
+	cfg, reg, err := r.lookupCommandTarget(req)
+	if err != nil {
+		return CommandResult{}, err
+	}
+	// From this point forward, use registration-owned identities for command
+	// execution and telemetry. Caller-provided names are only lookup inputs.
+	req.Worker = reg.Worker
+	req.Name = reg.Name
+
 	dispatchID := r.nextCommandDispatchID()
 	ctx, commandObservation := r.startCommandObservation(ctx, req.Worker, req.Name, dispatchID, startedAt)
 	defer func() {
 		r.endCommandObservation(ctx, commandObservation, req.Worker, req.Name, dispatchID, attempts, startedAt, err)
 	}()
-
-	cfg, reg, err := r.lookupCommandTarget(req)
-	if err != nil {
-		return CommandResult{}, err
-	}
 
 	generation, err := r.admitCommand(req.Worker)
 	if err != nil {
@@ -1303,11 +1310,11 @@ func (r *Runtime) failLoopCleanup(ctx context.Context, name string, generation u
 	r.observeRuntimeChanges(ctx, obs.before, obs.after)
 }
 
-func (r *Runtime) observeLoopCleanupFailure(ctx context.Context, name string, err error) {
+func (r *Runtime) observeLoopCleanupFailure(ctx context.Context, name string, err error, panicked bool) {
 	if err == nil {
 		return
 	}
-	r.observeFailure(ctx, name, "", newLoopCleanupError(err), false, time.Now(), "", 0)
+	r.observeFailure(ctx, name, "", newLoopCleanupError(err), panicked, time.Now(), "", 0)
 }
 
 func (r *Runtime) reportWorkerFailure(ctx context.Context, name string, generation uint64, err error) error {

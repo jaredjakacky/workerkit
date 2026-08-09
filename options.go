@@ -15,12 +15,13 @@ const (
 )
 
 // PanicPolicy controls how the runtime treats panics inside managed Start,
-// Stop, and command handling paths.
+// Stop, automatic LoopWorker cleanup, and command handling paths.
 type PanicPolicy string
 
 const (
-	// PanicPolicyRecover means the runtime should recover the panic, record it
-	// as a worker failure, and apply the configured failure policy.
+	// PanicPolicyRecover means the runtime should recover the panic and record a
+	// bounded failure. Automatic LoopWorker cleanup remains pending for Stop to
+	// retry; other managed paths apply their configured failure behavior.
 	PanicPolicyRecover PanicPolicy = "recover"
 	// PanicPolicyCrash means the runtime should surface the panic and allow the
 	// process to crash after any best-effort telemetry hooks run.

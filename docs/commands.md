@@ -116,6 +116,11 @@ result, err := runtime.Dispatch(ctx, workerkit.CommandRequest{
 })
 ```
 
+Workerkit resolves the registered target before command execution observation
+begins. Malformed requests and unknown workers or commands return their normal
+errors without copying caller-provided lookup names into command telemetry.
+Admission failures for a known registered command remain observed.
+
 The payload is opaque to Workerkit. If it is JSON, the worker chooses to treat
 it as JSON. Workerkit stores and forwards bytes.
 

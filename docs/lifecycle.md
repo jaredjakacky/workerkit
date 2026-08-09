@@ -234,6 +234,12 @@ and leaves cleanup pending for a later Stop. The automatic timeout is
 intentionally fixed; ordinary Stop retries use the worker's configured stop
 timeout.
 
+Automatic cleanup-hook panics follow the worker's panic policy. The default
+recovery policy discards the panic value, emits one sanitized panic-marked
+cleanup-failure observation, finalizes the exited loop, and leaves cleanup
+pending for a later Stop retry. Crash policy emits best-effort sanitized
+observation before surfacing the original panic.
+
 Stop cancellation suppresses only nil or cancellation-related loop results. If
 a loop returns an independent error while Stop races with it, Workerkit records
 that failure before publishing loop completion. Stop can still finish as

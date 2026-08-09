@@ -39,12 +39,18 @@ call public `Runtime` lifecycle methods. Status reads and worker-scoped
 
 `TransitionEvent` describes worker lifecycle transitions.
 
-`CommandStartEvent` describes one command dispatch beginning. It includes
-runtime name, worker name, command name, dispatch ID, and start time.
+`CommandStartEvent` describes one dispatch to a resolved registered command. It
+includes runtime name, registration-owned qualified worker and command names,
+dispatch ID, and start time. Malformed requests and syntactically valid but
+unregistered targets return their normal errors without emitting command
+execution observations, so caller-provided lookup values do not become metric
+dimensions or span names.
 
 `CommandEndEvent` describes one command dispatch completing. It includes
 duration, final success or failure, total handler attempts, safe public failure
 code/message, the private original cause, and the same dispatch identity.
+Admission failures for resolved commands remain observed with zero handler
+attempts.
 
 `CheckStartEvent` and `CheckEndEvent` describe one Workerkit-managed execution
 of an Opskit `Checker` or `CheckGroup`. The end event contains Workerkit-measured
@@ -106,6 +112,12 @@ runtime, err := workerkit.New(identity,
 
 Dispatch IDs are high-cardinality values. They belong on spans and events, not
 metric labels.
+
+Resolved registered commands create `workerkit.command <command>` spans and
+record `workerkit.command.dispatches` and `workerkit.command.duration`. Their
+default metric identities come from the bounded set of registered qualified
+worker and command names. Caller-provided unknown target values never reach
+these span names or metric attributes.
 
 Managed check executions create `workerkit.check` spans and record:
 

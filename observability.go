@@ -449,14 +449,15 @@ type CheckEndEvent struct {
 	Duration time.Duration
 }
 
-// CommandStartEvent reports the start of one command dispatch.
+// CommandStartEvent reports the start of one dispatch to a registered command.
 //
 // Observers may use this event to create command-scoped telemetry and return a
-// derived context from Observer.StartCommand.
+// derived context from Observer.StartCommand. Malformed requests and unresolved
+// worker or command names do not emit command observations.
 type CommandStartEvent struct {
 	// Runtime is the runtime name that emitted the event.
 	Runtime string
-	// Worker is the fully qualified worker name targeted by the command.
+	// Worker is the registration-owned fully qualified worker name.
 	Worker string
 	// Command is the registered command name.
 	Command string
@@ -467,15 +468,14 @@ type CommandStartEvent struct {
 	StartedAt time.Time
 }
 
-// CommandEndEvent reports the end of one command dispatch.
+// CommandEndEvent reports the end of one dispatch to a registered command.
 //
-// CommandEndEvent is emitted for normalized command attempts that reached
-// command observation. It includes lookup, admission, execution, and panic
-// failures that happen after the command request has been normalized.
+// CommandEndEvent includes admission, execution, and panic failures that happen
+// after the registered command target has been resolved.
 type CommandEndEvent struct {
 	// Runtime is the runtime name that emitted the event.
 	Runtime string
-	// Worker is the fully qualified worker name targeted by the command.
+	// Worker is the registration-owned fully qualified worker name.
 	Worker string
 	// Command is the registered command name.
 	Command string
@@ -483,7 +483,7 @@ type CommandEndEvent struct {
 	// end for one dispatch. It is unique within the runtime process.
 	DispatchID string
 	// Attempts is the number of command handler attempts actually executed.
-	// Lookup, admission, and other pre-handler failures report 0.
+	// Admission and other pre-handler failures report 0.
 	Attempts int
 	// StartedAt is when dispatch handling began.
 	StartedAt time.Time
@@ -512,7 +512,8 @@ type CommandEndEvent struct {
 // empty Command.
 // Failed automatic LoopWorker cleanup attempts emit a separate event, using
 // FailureCodeLoopCleanupFailed by default, while preserving the primary loop
-// failure in worker status.
+// failure in worker status. Recovered cleanup panics set Panic without exposing
+// the recovered value.
 // Lifecycle retry attempt failures update worker status but do not emit
 // FailureEvent until the worker enters StateFailed. Command handler returned
 // errors emit FailureEvent per failed attempt, including attempts that are later
