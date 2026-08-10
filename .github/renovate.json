@@ -28,7 +28,7 @@
   "customManagers": [
     {
       "customType": "regex",
-      "managerFilePatterns": ["/^go\\.mod$/"],
+      "managerFilePatterns": ["/(^|/)go\\.mod$/"],
       "matchStrings": [
         "// renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+) versioning=(?<versioning>\\S+)\\s+go (?<currentValue>\\d+\\.\\d+(?:\\.\\d+)?)"
       ]
@@ -37,7 +37,8 @@
       "customType": "regex",
       "managerFilePatterns": ["/^\\.github\\/workflows\\/.*\\.ya?ml$/"],
       "matchStrings": [
-        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+) versioning=(?<versioning>\\S+)\\s+- ['\"]?(?<currentValue>\\d+\\.\\d+)\\.x['\"]?"
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+) versioning=(?<versioning>\\S+)\\s+- ['\"]?(?<currentValue>\\d+\\.\\d+)\\.x['\"]?",
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+) versioning=(?<versioning>\\S+)\\s+go-version: ['\"]?(?<currentValue>\\d+\\.\\d+)\\.x['\"]?"
       ]
     },
     {
@@ -82,6 +83,13 @@
       "matchManagers": ["github-actions"],
       "matchUpdateTypes": ["digest", "minor", "patch", "pin"],
       "groupName": "github actions"
+    },
+    {
+      "description": "Let the custom Go support policy manage setup-go versions",
+      "matchManagers": ["github-actions"],
+      "matchDepTypes": ["uses-with"],
+      "matchDepNames": ["go"],
+      "enabled": false
     },
     {
       "matchManagers": ["gomod"],
