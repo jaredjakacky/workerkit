@@ -3,6 +3,8 @@ package servekitservice_test
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -308,6 +310,185 @@ func TestRunAppliesShutdownTimeout(t *testing.T) {
 	}
 }
 
+func TestRunSharesShutdownBudgetWithServekit(t *testing.T) {
+	addr := reserveLoopbackAddr(t)
+	handlerEntered := make(chan struct{})
+	handlerRelease := make(chan struct{})
+	handlerReleased := false
+	defer func() {
+		if !handlerReleased {
+			close(handlerRelease)
+		}
+	}()
+	stopCalled := make(chan struct{})
+
+	rt := newTestRuntime(t)
+	if err := rt.Register(workerkit.WorkerSpec{
+		Name: "worker",
+		Worker: testWorker{stop: func(context.Context) error {
+			close(stopCalled)
+			return nil
+		}},
+	}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	server := servekit.New(
+		servekit.WithAddr(addr),
+		servekit.WithAccessLogEnabled(false),
+		servekit.WithOpenTelemetryEnabled(false),
+		servekit.WithShutdownTimeout(2*time.Second),
+	)
+	server.HandleHTTP(http.MethodGet, "/stuck", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(handlerEntered)
+		<-handlerRelease
+		_, _ = io.WriteString(w, "too late")
+	}))
+	service, err := New(rt, server, WithShutdownTimeout(50*time.Millisecond))
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErrCh := make(chan error, 1)
+	go func() { runErrCh <- service.Run(ctx) }()
+	waitForHTTPStatus(t, "http://"+addr+"/readyz", http.StatusOK, 2*time.Second)
+
+	requestErrCh := make(chan error, 1)
+	go func() {
+		resp, requestErr := (&http.Client{Timeout: 3 * time.Second}).Get("http://" + addr + "/stuck")
+		if requestErr == nil {
+			_ = resp.Body.Close()
+		}
+		requestErrCh <- requestErr
+	}()
+	select {
+	case <-handlerEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stuck request did not reach handler")
+	}
+
+	startedAt := time.Now()
+	cancel()
+	runErr := waitForRunResult(t, runErrCh, 2*time.Second)
+	if !errors.Is(runErr, context.DeadlineExceeded) {
+		t.Fatalf("Run error = %v, want context deadline exceeded", runErr)
+	}
+	if elapsed := time.Since(startedAt); elapsed >= time.Second {
+		t.Fatalf("Run returned after %v, want one shared shutdown budget", elapsed)
+	}
+	select {
+	case <-stopCalled:
+	default:
+		t.Fatal("worker Stop was not attempted through the fallback")
+	}
+	select {
+	case requestErr := <-requestErrCh:
+		if requestErr == nil {
+			t.Fatal("stuck request completed without a transport error after forced close")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("stuck request connection remained open after shutdown")
+	}
+
+	close(handlerRelease)
+	handlerReleased = true
+}
+
+func TestRunKeepsLoopWorkerAliveUntilHTTPDrainCompletes(t *testing.T) {
+	addr := reserveLoopbackAddr(t)
+	loopStarted := make(chan struct{})
+	loopCanceled := make(chan struct{})
+	handlerEntered := make(chan struct{})
+	handlerRelease := make(chan struct{})
+	handlerReleased := false
+	defer func() {
+		if !handlerReleased {
+			close(handlerRelease)
+		}
+	}()
+
+	rt := newTestRuntime(t)
+	loopWorker := workerkit.NewLoopWorker(func(ctx context.Context, _ workerkit.WorkerRuntime) error {
+		close(loopStarted)
+		<-ctx.Done()
+		close(loopCanceled)
+		return ctx.Err()
+	})
+	if err := rt.Register(workerkit.WorkerSpec{Name: "loop", Worker: loopWorker}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	server := servekit.New(
+		servekit.WithAddr(addr),
+		servekit.WithAccessLogEnabled(false),
+		servekit.WithOpenTelemetryEnabled(false),
+		servekit.WithShutdownTimeout(2*time.Second),
+	)
+	server.HandleHTTP(http.MethodGet, "/work", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(handlerEntered)
+		<-handlerRelease
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	service, err := New(rt, server, WithShutdownTimeout(2*time.Second))
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErrCh := make(chan error, 1)
+	go func() { runErrCh <- service.Run(ctx) }()
+	waitForHTTPStatus(t, "http://"+addr+"/readyz", http.StatusOK, 2*time.Second)
+	select {
+	case <-loopStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop worker did not start")
+	}
+
+	requestErrCh := make(chan error, 1)
+	go func() {
+		resp, requestErr := (&http.Client{Timeout: 3 * time.Second}).Get("http://" + addr + "/work")
+		if requestErr == nil {
+			_ = resp.Body.Close()
+		}
+		requestErrCh <- requestErr
+	}()
+	select {
+	case <-handlerEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("active request did not reach handler")
+	}
+
+	cancel()
+	select {
+	case <-loopCanceled:
+		t.Fatal("loop worker was canceled while active HTTP handler was draining")
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case runErr := <-runErrCh:
+		t.Fatalf("Run returned before active HTTP handler completed: %v", runErr)
+	default:
+	}
+
+	close(handlerRelease)
+	handlerReleased = true
+	if requestErr := <-requestErrCh; requestErr != nil {
+		t.Fatalf("active request error = %v, want graceful completion", requestErr)
+	}
+	if runErr := waitForRunResult(t, runErrCh, 2*time.Second); runErr != nil {
+		t.Fatalf("Run error = %v, want nil", runErr)
+	}
+	select {
+	case <-loopCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop worker was not canceled after HTTP drain completed")
+	}
+	if state := requireWorkerState(t, rt, "loop"); state != workerkit.StateStopped {
+		t.Fatalf("loop state = %s, want stopped", state)
+	}
+}
+
 func TestRunRejectsInvalidService(t *testing.T) {
 	t.Parallel()
 
@@ -362,4 +543,48 @@ func performRequest(server *servekit.Server, method string, path string) *httpte
 	req := httptest.NewRequest(method, path, nil)
 	server.Handler().ServeHTTP(rec, req)
 	return rec
+}
+
+func reserveLoopbackAddr(t *testing.T) string {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve loopback address: %v", err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("release loopback address: %v", err)
+	}
+	return addr
+}
+
+func waitForHTTPStatus(t *testing.T, url string, want int, timeout time.Duration) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	client := &http.Client{Timeout: 100 * time.Millisecond}
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(url)
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == want {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%s did not return status %d within %v", url, want, timeout)
+}
+
+func waitForRunResult(t *testing.T, errCh <-chan error, timeout time.Duration) error {
+	t.Helper()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-time.After(timeout):
+		t.Fatalf("Run did not return within %v", timeout)
+		return nil
+	}
 }

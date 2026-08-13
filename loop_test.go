@@ -196,6 +196,46 @@ func TestLoopWorkerAutoReadyMarksWorkerReadyByDefault(t *testing.T) {
 	}
 }
 
+func TestLoopWorkerStartContextCancellationDoesNotCancelLoop(t *testing.T) {
+	loopStarted := make(chan struct{})
+	loopCanceled := make(chan struct{})
+	worker := NewLoopWorker(func(ctx context.Context, _ WorkerRuntime) error {
+		close(loopStarted)
+		<-ctx.Done()
+		close(loopCanceled)
+		return ctx.Err()
+	})
+	rt := newTestRuntime(t)
+	if err := rt.Register(WorkerSpec{Name: "loop", Worker: worker}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	startCtx, cancelStart := context.WithCancel(context.Background())
+	if err := rt.Start(startCtx, "loop"); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	select {
+	case <-loopStarted:
+	case <-time.After(time.Second):
+		t.Fatal("loop did not start")
+	}
+	cancelStart()
+
+	select {
+	case <-loopCanceled:
+		t.Fatal("loop was canceled with the completed Start context")
+	case <-time.After(testNoSignalTimeout):
+	}
+	if err := rt.Stop(context.Background(), "loop"); err != nil {
+		t.Fatalf("Stop returned error: %v", err)
+	}
+	select {
+	case <-loopCanceled:
+	default:
+		t.Fatal("loop was not canceled by Stop")
+	}
+}
+
 func TestLoopWorkerLoopCanMarkReadyWhenAutoReadyDisabled(t *testing.T) {
 	readySet := make(chan struct{})
 	worker := NewLoopWorker(

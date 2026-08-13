@@ -873,11 +873,11 @@ registry and Servekit presentation explicitly.
 
 - `WithGracefulWorkerShutdown(enabled bool)`
 
-  Controls whether `Run` drains, waits for idle, and stops workers after Servekit exits or worker startup fails.
+  Controls whether `Run` coordinates Servekit and Workerkit graceful shutdown or cleans up workers after worker startup fails.
 
 - `WithShutdownTimeout(timeout time.Duration)`
 
-  Sets the outer service-level budget for graceful worker shutdown. Zero keeps the default, and negative disables this timeout.
+  Sets the outer service-level budget shared by Servekit drain and HTTP shutdown followed by Workerkit drain, idle wait, and stop. Servekit's configured shutdown timeout remains an inner HTTP cap. After the shared budget expires, `Run` may give `StopAll` one additional five-second best-effort fallback. Zero keeps the default, and negative disables the service-level timeout.
 
 ## Package `retry`
 

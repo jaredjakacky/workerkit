@@ -170,7 +170,9 @@ and runtime concurrency limits and idle waits.
 
 Use `Shutdown` for CLIs, tests, and non-Servekit programs. When useful,
 `servekitservice.New` coordinates Workerkit lifecycle around an
-application-owned Servekit server.
+application-owned Servekit server. That coordinator keeps workers available
+while active HTTP handlers drain, then gives Workerkit the time remaining in
+the shared service shutdown budget.
 
 HTTP lifecycle controls are not Kubernetes Deployment lifecycle controls. They
 mutate one Workerkit runtime in one process. Kubernetes rollout, termination,
