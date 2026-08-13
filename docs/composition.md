@@ -151,10 +151,13 @@ if err != nil {
 return service.Run(ctx)
 ```
 
-The coordinator starts registered workers before serving and gracefully drains
-and stops them after Servekit exits. It does not construct the server, create a
-registry, register components, or mount routes. `Service.Server()` returns the
-same application-owned server.
+The coordinator starts registered workers before serving. On shutdown it gives
+Servekit's drain delay and HTTP shutdown plus Workerkit's later drain, idle
+wait, and stop phases one shared service-level budget. Worker resources remain
+available until Servekit exits so active HTTP handlers can finish safely. The
+coordinator does not construct the server, create a registry, register
+components, or mount routes. `Service.Server()` returns the same
+application-owned server.
 
 ## Readiness and Read-Only Inspection
 

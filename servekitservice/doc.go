@@ -2,8 +2,9 @@
 // application-owned Servekit server.
 //
 // The package starts workers before serving, runs Servekit, and gracefully
-// drains/stops workers when the service exits. Graceful worker shutdown is
-// bounded by a service-level timeout unless disabled with WithShutdownTimeout.
+// drains/stops workers when the service exits. Servekit and Workerkit graceful
+// shutdown share one service-level timeout unless disabled with
+// WithShutdownTimeout.
 //
 // Applications construct the shared Opskit registry and Servekit server
 // explicitly, then pass the server to New. This package does not create a

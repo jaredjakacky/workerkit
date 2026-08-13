@@ -53,20 +53,24 @@ func WithStartWorkers(enabled bool) Option {
 	}
 }
 
-// WithGracefulWorkerShutdown controls whether Run drains, waits for idle, and
-// stops workers after Servekit exits or after worker startup fails.
+// WithGracefulWorkerShutdown controls whether Run coordinates Servekit and
+// Workerkit shutdown or cleans up workers after worker startup fails.
 func WithGracefulWorkerShutdown(enabled bool) Option {
 	return func(cfg *config) {
 		cfg.gracefulWorkerShutdown = enabled
 	}
 }
 
-// WithShutdownTimeout sets the outer service-level budget for graceful worker
-// shutdown. The default is 20 seconds.
+// WithShutdownTimeout sets the outer service-level budget for coordinated
+// Servekit and Workerkit shutdown. The default is 20 seconds.
 //
-// This one budget covers DrainAllBestEffort, WaitAllIdle, and StopAll. If the
-// service shutdown budget is smaller than a worker's configured stop timeout,
-// it may cut that worker stop attempt short.
+// The budget begins when Servekit starts graceful shutdown and covers its drain
+// delay and HTTP shutdown followed by Workerkit DrainAllBestEffort, WaitAllIdle,
+// and StopAll. Servekit's configured shutdown timeout remains an inner HTTP
+// shutdown cap. If the remaining service shutdown budget is smaller than a
+// worker's configured stop timeout, it may cut that worker stop attempt short.
+// If the shared budget expires, Run may give StopAll one additional five-second
+// best-effort fallback window to release worker-owned resources.
 //
 // This timeout is cooperative because Workerkit shutdown calls worker Stop
 // methods with a context deadline. Workers that ignore ctx.Done() can still
@@ -89,9 +93,9 @@ func defaultConfig() config {
 	return config{
 		startWorkers:           true,
 		gracefulWorkerShutdown: true,
-		// Keep the default outer shutdown budget below a common 30 second
-		// Kubernetes termination grace period, leaving room for StopAll fallback
-		// and process overhead.
+		// Keep the coordinated shutdown budget below a common 30 second
+		// Kubernetes termination grace period, leaving room for the StopAll
+		// fallback and process overhead.
 		shutdownTimeout: 20 * time.Second,
 	}
 }
@@ -177,27 +181,47 @@ func (s *Service) Run(ctx context.Context) error {
 		manageWorkerShutdown = true
 	}
 
-	runErr := s.server.Run(ctx)
-	if s.config.gracefulWorkerShutdown && manageWorkerShutdown {
-		if err := s.shutdownWorkers(ctx); err != nil {
-			return errors.Join(runErr, err)
-		}
+	if !s.config.gracefulWorkerShutdown || !manageWorkerShutdown {
+		return s.server.Run(ctx)
+	}
+
+	baseCtx := context.WithoutCancel(ctx)
+	var shutdownCtx context.Context
+	var shutdownCancel context.CancelFunc
+	runErr := s.server.RunWithShutdownContext(ctx, func() context.Context {
+		shutdownCtx, shutdownCancel = s.newShutdownContext(baseCtx)
+		return shutdownCtx
+	})
+	if shutdownCtx == nil {
+		// Servekit returned because listening or serving failed before graceful
+		// shutdown began. Give Workerkit a fresh cleanup budget on that path.
+		shutdownCtx, shutdownCancel = s.newShutdownContext(baseCtx)
+	}
+	defer shutdownCancel()
+	if err := s.shutdownWorkersWithContext(baseCtx, shutdownCtx); err != nil {
+		return errors.Join(runErr, err)
 	}
 	return runErr
 }
 
 func (s *Service) shutdownWorkers(ctx context.Context) error {
-	// Servekit often returns after ctx is canceled. Worker shutdown still needs a
+	// Startup may fail because ctx was canceled. Worker cleanup still needs a
 	// usable context for drain, idle polling, and Stop calls, so keep context
-	// values, detach cancellation, and apply the service shutdown timeout below.
+	// values, detach cancellation, and apply a fresh shutdown timeout.
 	baseCtx := context.WithoutCancel(ctx)
-	shutdownCtx := baseCtx
-	if s.config.shutdownTimeout > 0 {
-		var cancel context.CancelFunc
-		shutdownCtx, cancel = context.WithTimeout(shutdownCtx, s.config.shutdownTimeout)
-		defer cancel()
-	}
+	shutdownCtx, cancel := s.newShutdownContext(baseCtx)
+	defer cancel()
+	return s.shutdownWorkersWithContext(baseCtx, shutdownCtx)
+}
 
+func (s *Service) newShutdownContext(baseCtx context.Context) (context.Context, context.CancelFunc) {
+	if s.config.shutdownTimeout > 0 {
+		return context.WithTimeout(baseCtx, s.config.shutdownTimeout)
+	}
+	return baseCtx, func() {}
+}
+
+func (s *Service) shutdownWorkersWithContext(baseCtx, shutdownCtx context.Context) error {
 	err := s.runtime.Shutdown(shutdownCtx)
 	if err == nil || shutdownCtx.Err() == nil {
 		return err
