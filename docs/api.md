@@ -644,7 +644,8 @@ them. These constructors adapt those hooks into ordinary Workerkit workers.
 
 - `WithCheckInterval(...)`
 
-  Sets the steady-state interval between check executions.
+  Sets the post-completion wait before the next check execution. Executions are
+  serial, so start-to-start cadence also includes execution time.
 
 - `WithCheckInitialDelay(...)`
 
@@ -662,7 +663,8 @@ them. These constructors adapt those hooks into ordinary Workerkit workers.
 
 - `WithCheckJitter(...)`
 
-  Sets an optional function that adjusts each interval wait.
+  Sets an optional function that returns the complete interval wait, not a
+  duration added to the configured interval.
 
 - `WithCheckReadyOnSuccess(...)`
 
