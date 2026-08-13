@@ -275,6 +275,20 @@ reporting. Opskit defines the check contracts but does not schedule them. The
 checked component owns check meaning and any cached component health exposed
 through Opskit status or readiness.
 
+Check loops execute serially and never overlap themselves. After one execution
+returns, Workerkit applies the configured jitter function to the interval and
+waits the complete resulting delay before starting the next execution. The
+interval is therefore a post-completion wait, not a fixed start-to-start period;
+the start-to-start cadence also includes execution time.
+
+Components that expose time-limited cached health should set their stale-after
+window greater than the maximum expected completion-to-completion refresh gap.
+For one checker, budget the maximum jittered interval wait, maximum execution
+duration, and scheduler margin. For a check-group member, also budget its queue
+position and the work after its previous completion and before its next
+completion. A second interval may be added deliberately as missed-cycle grace,
+but it is a policy allowance rather than part of the ordinary timing equation.
+
 Ready and not-ready results update the check worker's readiness by default. A
 not-ready result does not stop the loop unless
 `WithCheckReportFailureOnNotReady(true)` is configured. Panics fail the loop

@@ -7,10 +7,62 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	opskit "github.com/jaredjakacky/opskit"
 )
+
+func TestRunCheckLoopWaitsDefaultIntervalAfterExecutionCompletes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cfg := defaultCheckLoopConfig()
+		if cfg.interval != 30*time.Second || !cfg.runImmediately || !cfg.readyOnSuccess {
+			t.Fatalf("defaultCheckLoopConfig() = %#v, want 30s immediate ready-managed loop", cfg)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		var firstStarted time.Time
+		var firstCompleted time.Time
+		var secondStarted time.Time
+		calls := 0
+
+		go func() {
+			done <- runCheckLoop(ctx, &checkLoopRuntime{}, cfg, func(context.Context) checkLoopOutcome {
+				calls++
+				switch calls {
+				case 1:
+					firstStarted = time.Now()
+					time.Sleep(5 * time.Second)
+					firstCompleted = time.Now()
+				case 2:
+					secondStarted = time.Now()
+					cancel()
+				default:
+					panic("unexpected extra check execution")
+				}
+				return checkLoopOutcome{ready: true, state: opskit.StateReady}
+			})
+		}()
+
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatalf("runCheckLoop error = %v, want context.Canceled", err)
+		}
+		if calls != 2 {
+			t.Fatalf("check executions = %d, want 2", calls)
+		}
+		if got := firstCompleted.Sub(firstStarted); got != 5*time.Second {
+			t.Fatalf("first execution duration = %v, want 5s", got)
+		}
+		if got := secondStarted.Sub(firstCompleted); got != 30*time.Second {
+			t.Fatalf("completion-to-next-start wait = %v, want 30s", got)
+		}
+		if got := secondStarted.Sub(firstStarted); got != 35*time.Second {
+			t.Fatalf("start-to-start cadence = %v, want execution plus interval (35s)", got)
+		}
+	})
+}
 
 func TestRunCheckLoopReturnsSetReadyError(t *testing.T) {
 	t.Parallel()

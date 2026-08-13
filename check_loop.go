@@ -68,7 +68,9 @@ func defaultCheckLoopConfig() checkLoopConfig {
 	}
 }
 
-// WithCheckInterval sets the steady-state interval between check executions.
+// WithCheckInterval sets the wait after one check execution completes and
+// before the next begins. Check loops execute serially and never overlap
+// themselves, so start-to-start cadence also includes execution time.
 // Non-positive values keep the default interval.
 func WithCheckInterval(interval time.Duration) CheckLoopOption {
 	return func(cfg *checkLoopConfig) {
@@ -107,8 +109,10 @@ func WithCheckTimeout(timeout time.Duration) CheckLoopOption {
 	}
 }
 
-// WithCheckJitter sets an optional function that adjusts each interval wait.
-// Returned non-positive durations fall back to the configured interval.
+// WithCheckJitter sets an optional function that receives the configured
+// interval and returns the complete wait before the next execution, not a
+// duration to add to the interval. Returned non-positive durations fall back to
+// the configured interval.
 func WithCheckJitter(fn func(time.Duration) time.Duration) CheckLoopOption {
 	return func(cfg *checkLoopConfig) {
 		cfg.jitter = fn
