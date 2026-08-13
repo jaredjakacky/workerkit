@@ -8,7 +8,7 @@ PKGS ?= ./...
 COVER_PKGS ?= $(shell $(GO) list $(PKGS) | grep -v '/examples')
 GOFILES := $(filter-out $(shell git ls-files --deleted -- '*.go'),$(shell git ls-files -- '*.go'))
 EXAMPLE_PKGS ?= $(shell $(GO) list ./examples/... | grep -v '/examples/testing$$')
-GOVULNCHECK_VERSION ?= v1.6.0
+GOVULNCHECK_VERSION ?= v1.7.0
 ALLOW_TIDY_CHANGES ?= 0
 RELEASE_CHECK_DIR := tools/releasecheck
 
