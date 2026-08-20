@@ -2,7 +2,7 @@
 
 [![Release](https://img.shields.io/github/v/release/jaredjakacky/workerkit?sort=semver)](https://github.com/jaredjakacky/workerkit/releases)
 [![CI](https://github.com/jaredjakacky/workerkit/actions/workflows/ci.yaml/badge.svg)](https://github.com/jaredjakacky/workerkit/actions/workflows/ci.yaml)
-[![Go Support](https://img.shields.io/badge/go%20support-1.25.x%20%7C%201.26.x-00ADD8)](https://github.com/jaredjakacky/workerkit/actions/workflows/ci.yaml)
+[![Go Support](https://img.shields.io/badge/go%20support-1.26.x%20%7C%201.26.x-00ADD8)](https://github.com/jaredjakacky/workerkit/actions/workflows/ci.yaml)
 [![License](https://img.shields.io/github/license/jaredjakacky/workerkit)](https://github.com/jaredjakacky/workerkit/blob/main/LICENSE)
 
 ## Overview
